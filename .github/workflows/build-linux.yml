@@ -1,12 +1,14 @@
-name: Build Linux (tar.gz x64 + arm64)
+name: Build Linux (instalador .sh x64 + arm64)
 
 # Compila los módulos nativos EN Linux (node-pty + hydra_core, ambos N-API) y
-# empaqueta Hydra IDE como .tar.gz para x86_64 y ARM64. Al hacerse la compilación
-# en runners Linux reales, la terminal integrada (node-pty) SÍ funciona.
+# genera el instalador autoextraíble .sh para x86_64 y ARM64. Al hacerse la
+# compilación en runners Linux reales, la terminal integrada (node-pty) SÍ funciona.
 #
 # Disparadores:
 #   - Manual desde la pestaña Actions (workflow_dispatch)
-#   - Al empujar un tag v* (ej. v0.2.3) -> además crea un Release con los tarballs
+#   - Al empujar un tag v* (ej. v0.2.4) -> además crea un Release con los .sh
+#
+# La versión sale de package.json; el tag DEBE coincidir (misma versión que Windows).
 
 on:
   workflow_dispatch:
@@ -33,6 +35,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verificar que el tag coincide con package.json (misma versión que Windows)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PKG="v$(node -p "require('./package.json').version")"
+          if [ "$PKG" != "${{ github.ref_name }}" ]; then
+            echo "El tag ${{ github.ref_name }} no coincide con la versión de package.json ($PKG)."
+            echo "Bump package.json.version a la versión de Windows y usa ese mismo tag."
+            exit 1
+          fi
+          echo "Versión OK: $PKG"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -61,8 +74,8 @@ jobs:
           mkdir -p build
           cp "Hydra IDE.png" build/icon.png
 
-      - name: Empaquetar tar.gz (${{ matrix.arch }})
-        run: npx electron-builder --linux tar.gz --${{ matrix.arch }} --publish never
+      - name: Empaquetar app (dir, sin tar.gz) (${{ matrix.arch }})
+        run: npx electron-builder --linux dir --${{ matrix.arch }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -89,13 +102,11 @@ jobs:
           chmod +x "$OUT"
           ls -la "$OUT"
 
-      - name: Subir artefactos (tar.gz + instalador .sh)
+      - name: Subir artefacto (instalador .sh)
         uses: actions/upload-artifact@v4
         with:
           name: hydra-ide-linux-${{ matrix.arch }}
-          path: |
-            dist/*.tar.gz
-            dist/*.sh
+          path: dist/*.sh
           if-no-files-found: error
 
   release:
@@ -109,10 +120,8 @@ jobs:
         with:
           path: artifacts
 
-      - name: Crear/actualizar Release con los tarballs e instaladores
+      - name: Crear/actualizar Release con los instaladores .sh
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.sh
+          files: artifacts/**/*.sh
           fail_on_unmatched_files: true

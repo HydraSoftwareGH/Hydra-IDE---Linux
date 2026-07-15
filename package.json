@@ -70,13 +70,7 @@
     },
     "linux": {
       "target": [
-        {
-          "target": "tar.gz",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
+        "dir"
       ],
       "artifactName": "${productName}-${version}-linux-${arch}.${ext}",
       "icon": "build/icon.png",

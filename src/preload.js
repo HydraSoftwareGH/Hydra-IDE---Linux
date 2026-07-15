@@ -60,6 +60,9 @@ contextBridge.exposeInMainWorld('api', {
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   openPath: (p) => ipcRenderer.invoke('shell:openPath', p),
 
+  // Plataforma del SO ('win32' | 'linux' | 'darwin') — para el selector de updates.
+  platform: process.platform,
+
   // Auto-actualización (electron-updater)
   appVersion: () => ipcRenderer.invoke('app:version'),
   checkUpdates: () => ipcRenderer.invoke('update:check'),

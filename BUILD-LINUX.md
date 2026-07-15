@@ -1,17 +1,20 @@
 # Build de Linux (x86_64 + ARM64) con GitHub Actions
 
-Los `.tar.gz` de Linux se generan en **GitHub Actions**, no en Windows, porque los
-módulos nativos (`node-pty` y `hydra_core`, ambos N-API) deben compilarse **en Linux**
+Los instaladores **`.sh`** de Linux se generan en **GitHub Actions**, no en Windows, porque
+los módulos nativos (`node-pty` y `hydra_core`, ambos N-API) deben compilarse **en Linux**
 para que la **terminal integrada funcione**.
 
 Workflow: [`.github/workflows/build-linux.yml`](.github/workflows/build-linux.yml)
 
 ## Qué hace
+- Verifica que el **tag coincida con `package.json.version`** (misma versión que Windows).
 - Compila `hydra_core` (`npm run build:native`) y `node-pty` (`node-gyp rebuild`) en Linux.
-- Empaqueta con `electron-builder --linux tar.gz` para **x64** (runner `ubuntu-22.04`) y
-  **arm64** (runner `ubuntu-22.04-arm`, ARM64 nativo de GitHub).
+- Empaqueta con `electron-builder --linux dir` (sin tar.gz) y crea el instalador
+  autoextraíble `.sh` con **makeself**, para **x64** (`ubuntu-22.04`) y **arm64**
+  (`ubuntu-22.04-arm`, ARM64 nativo de GitHub).
 - Verifica que los `.node` sean ELF de Linux de la arquitectura correcta.
-- Sube los `.tar.gz` como *artifacts*. Si se empuja un tag `v*`, además crea un **Release**.
+- Sube los `.sh` como *artifacts*. Si se empuja un tag `v*`, además crea un **Release** con
+  los instaladores (la web y el panel Hydra Updates los leen de aquí).
 
 ## Cómo lanzarlo
 

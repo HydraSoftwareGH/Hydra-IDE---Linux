@@ -3570,8 +3570,16 @@ function openPublishModal(editing) {
 
 // --------------------------------------------------------------------------
 // Hydra Updates — muestra las releases del repo de actualizaciones (GitHub API).
+// Dos plataformas: Windows (.exe, repo de updates) y Linux (.sh x64/arm64, repo
+// de builds de Linux). El selector cambia de repo y recarga.
 // --------------------------------------------------------------------------
-const UPDATES_REPO = 'HydraSoftwareGH/Hydra-Updates---IDE';
+const WINDOWS_REPO = 'HydraSoftwareGH/Hydra-Updates---IDE';
+const LINUX_REPO = 'HydraSoftwareGH/Hydra-IDE---Linux';
+// Plataforma seleccionada: por defecto el SO actual (linux -> Linux; resto -> Windows).
+let updatesPlatform = (localStorage.getItem('hydra.updatesPlatform')
+  || ((window.api && window.api.platform === 'linux') ? 'linux' : 'win'));
+const updatesRepo = () => (updatesPlatform === 'linux' ? LINUX_REPO : WINDOWS_REPO);
+
 let releases = [];
 let releasesLoaded = false, releasesLoading = false, releasesError = '';
 
@@ -3582,7 +3590,7 @@ async function loadReleases(force) {
   const rb = el('updates-refresh'); if (rb) rb.classList.add('spinning');
   renderUpdatesList();
   try {
-    const res = await fetch('https://api.github.com/repos/' + UPDATES_REPO + '/releases?per_page=30', {
+    const res = await fetch('https://api.github.com/repos/' + updatesRepo() + '/releases?per_page=30', {
       headers: { 'Accept': 'application/vnd.github+json' },
     });
     if (!res.ok) throw new Error('GitHub respondió ' + res.status + (res.status === 404 ? ' (¿repo privado o sin releases?)' : ''));
@@ -3612,6 +3620,24 @@ function fmtDate(iso) {
   if (!iso) return '';
   try { return new Date(iso).toLocaleDateString('es', { year: 'numeric', month: 'short', day: 'numeric' }); }
   catch { return iso.slice(0, 10); }
+}
+
+// Refleja la plataforma activa en los botones del selector.
+function syncPlatButtons() {
+  const bw = el('updates-plat-win'), bl = el('updates-plat-linux');
+  if (bw) bw.classList.toggle('active', updatesPlatform === 'win');
+  if (bl) bl.classList.toggle('active', updatesPlatform === 'linux');
+}
+
+// Cambia de plataforma (win/linux): recarga las releases del repo correspondiente.
+function setUpdatesPlatform(plat) {
+  if (plat !== 'win' && plat !== 'linux') return;
+  if (plat === updatesPlatform) return;
+  updatesPlatform = plat;
+  try { localStorage.setItem('hydra.updatesPlatform', plat); } catch (e) {}
+  syncPlatButtons();
+  releasesLoaded = false; releases = []; releasesError = '';
+  loadReleases(true);
 }
 
 function renderUpdatesList() {
@@ -3671,7 +3697,7 @@ function renderUpdatesList() {
 }
 
 function openUpdateTab(rel) {
-  const key = 'upd:' + rel.tag_name;
+  const key = 'upd:' + updatesPlatform + ':' + rel.tag_name;
   if (!tabs.has(key)) { tabs.set(key, { kind: 'update', rel, name: rel.tag_name }); openFiles.push(key); }
   setActiveTab(key);
   renderTabs();
@@ -3680,10 +3706,26 @@ function openUpdateTab(rel) {
 function renderUpdateDetails(rel) {
   const d = el('update-details');
   const assets = (rel.assets || []).filter((a) => a && a.browser_download_url);
-  const installer = assets.find((a) => /\.exe$/i.test(a.name));
-  const dlMain = installer
-    ? `<a class="upd-dl" href="${installer.browser_download_url}" data-ext="1"><i class="codicon codicon-desktop-download"></i> Descargar instalador (${(installer.size/1048576).toFixed(1)} MB)</a>`
-    : `<a class="upd-dl" href="${rel.html_url}" data-ext="1"><i class="codicon codicon-link-external"></i> Ver en GitHub</a>`;
+  const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
+  let dlMain;
+  if (updatesPlatform === 'linux') {
+    // Instaladores .sh por arquitectura (sin tar.gz).
+    const sh = assets.filter((a) => /\.sh$/i.test(a.name));
+    const arm = sh.find((a) => /arm64|aarch64/i.test(a.name));
+    const x64 = sh.find((a) => /x64|x86[_-]?64|amd64/i.test(a.name) && !/arm64|aarch64/i.test(a.name));
+    const btn = (a, label) => `<a class="upd-dl" href="${a.browser_download_url}" data-ext="1"><i class="codicon codicon-desktop-download"></i> ${label} .sh (${mb(a.size)})</a>`;
+    const parts = [];
+    if (x64) parts.push(btn(x64, 'x86_64'));
+    if (arm) parts.push(btn(arm, 'ARM64'));
+    dlMain = parts.length
+      ? parts.join('')
+      : `<a class="upd-dl" href="${rel.html_url}" data-ext="1"><i class="codicon codicon-link-external"></i> Ver en GitHub</a>`;
+  } else {
+    const installer = assets.find((a) => /\.exe$/i.test(a.name));
+    dlMain = installer
+      ? `<a class="upd-dl" href="${installer.browser_download_url}" data-ext="1"><i class="codicon codicon-desktop-download"></i> Descargar instalador (${mb(installer.size)})</a>`
+      : `<a class="upd-dl" href="${rel.html_url}" data-ext="1"><i class="codicon codicon-link-external"></i> Ver en GitHub</a>`;
+  }
   const assetList = assets.length
     ? '<div class="upd-assets"><h4>Archivos</h4>' + assets.map((a) =>
         `<a class="upd-asset" href="${a.browser_download_url}" data-ext="1"><i class="codicon codicon-cloud-download"></i> ${escapeHtml(a.name)} <span>${(a.size/1048576).toFixed(1)} MB · ${a.download_count || 0} descargas</span></a>`
@@ -6788,6 +6830,10 @@ el('ai-clear').addEventListener('click', () => {
 el('ai-login-btn').addEventListener('click', () => openLogin());
 el('act-settings').addEventListener('click', openSettings);
 el('updates-refresh').addEventListener('click', () => loadReleases(true));
+// Selector de plataforma (Windows / Linux) del panel Hydra Updates.
+el('updates-plat-win').addEventListener('click', () => setUpdatesPlatform('win'));
+el('updates-plat-linux').addEventListener('click', () => setUpdatesPlatform('linux'));
+syncPlatButtons();
 
 // Adjuntar imagen
 el('ai-attach').addEventListener('click', () => el('ai-file').click());
