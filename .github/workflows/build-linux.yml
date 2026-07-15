@@ -73,11 +73,29 @@ jobs:
           echo "== node-pty =="
           find node_modules/node-pty -name '*.node' -exec file {} \; || true
 
-      - name: Subir artefacto
+      - name: Crear instalador autoextraíble (.sh)
+        run: |
+          set -e
+          sudo apt-get install -y --no-install-recommends makeself
+          VERSION=$(node -p "require('./package.json').version")
+          APPDIR=$(find dist -maxdepth 1 -type d -name '*unpacked*' | head -1)
+          if [ -z "$APPDIR" ]; then echo "No se encontró el directorio unpacked"; ls -la dist; exit 1; fi
+          echo "Empaquetando instalador desde: $APPDIR"
+          cp build/icon.png "$APPDIR/hydra-ide.png"
+          cp installer/setup.sh "$APPDIR/setup.sh"
+          chmod +x "$APPDIR/setup.sh"
+          OUT="dist/Hydra-IDE-${VERSION}-linux-${{ matrix.arch }}.sh"
+          makeself --gzip "$APPDIR" "$OUT" "Hydra IDE ${VERSION} (${{ matrix.arch }})" ./setup.sh
+          chmod +x "$OUT"
+          ls -la "$OUT"
+
+      - name: Subir artefactos (tar.gz + instalador .sh)
         uses: actions/upload-artifact@v4
         with:
           name: hydra-ide-linux-${{ matrix.arch }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.sh
           if-no-files-found: error
 
   release:
@@ -91,8 +109,10 @@ jobs:
         with:
           path: artifacts
 
-      - name: Crear/actualizar Release con los tarballs
+      - name: Crear/actualizar Release con los tarballs e instaladores
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.tar.gz
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.sh
           fail_on_unmatched_files: true
