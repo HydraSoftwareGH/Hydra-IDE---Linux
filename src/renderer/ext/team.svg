@@ -1,0 +1,11 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <rect width="64" height="64" rx="14" fill="#10141c"/>
+  <!-- Persona izquierda -->
+  <circle cx="22" cy="24" r="6.5" fill="#56b3b4"/>
+  <path d="M10 46c0-7 5.5-11 12-11s12 4 12 11z" fill="#56b3b4"/>
+  <!-- Persona derecha -->
+  <circle cx="43" cy="24" r="6.5" fill="#7c6bff"/>
+  <path d="M31 46c0-7 5.5-11 12-11s12 4 12 11z" fill="#7c6bff"/>
+  <!-- Chispa de colaboración -->
+  <circle cx="32" cy="14" r="3.2" fill="#2ff0c4"/>
+</svg>

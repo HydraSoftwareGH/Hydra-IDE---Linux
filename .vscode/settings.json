@@ -1,0 +1,5 @@
+{
+  "//": "La web oficial de Hydra (landing + IDE en /ide) vive en website/public.",
+  "//2": "Fijamos la raíz de Live Server ahí para que http://127.0.0.1:5500/ y /ide funcionen igual que en producción (Vercel). Reiniciá Live Server tras cambiar esto.",
+  "liveServer.settings.root": "/website/public"
+}

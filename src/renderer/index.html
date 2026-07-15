@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self';
+                 script-src 'self' 'unsafe-eval' blob: data: https://apis.google.com https://www.gstatic.com https://*.firebaseapp.com;
+                 worker-src 'self' blob: data:;
+                 child-src 'self' blob: data:;
+                 style-src 'self' 'unsafe-inline';
+                 font-src 'self' data:;
+                 img-src 'self' data: blob: https:;
+                 connect-src 'self' https://*.googleapis.com https://securetoken.googleapis.com https://identitytoolkit.googleapis.com https://www.googleapis.com https://iubgkxdjohlvmlefyugo.supabase.co wss://iubgkxdjohlvmlefyugo.supabase.co https://gwibpxgibmraqebetvss.supabase.co wss://gwibpxgibmraqebetvss.supabase.co https://api.github.com;
+                 frame-src 'self' https://*.firebaseapp.com https://accounts.google.com;" />
+  <title>Hydra IDE</title>
+  <link rel="stylesheet" href="codicons/codicon.css" />
+  <link rel="stylesheet" href="vendor/xterm.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Barra de título personalizada (estilo VS Code) -->
+  <div id="titlebar">
+    <div class="title-left">
+      <img src="hydra-logo.svg" class="title-logo" alt="Hydra IDE" />
+      <nav class="menus" id="menus">
+        <span class="menu-trigger" data-menu="archivo">Archivo</span>
+        <span class="menu-trigger" data-menu="editar">Editar</span>
+        <span class="menu-trigger" data-menu="seleccion">Selección</span>
+        <span class="menu-trigger" data-menu="ver">Ver</span>
+        <span class="menu-trigger" data-menu="ir">Ir</span>
+        <span class="menu-trigger" data-menu="ejecutar">Ejecutar</span>
+        <span class="menu-trigger" data-menu="ayuda">Ayuda</span>
+      </nav>
+    </div>
+    <div class="title-center" id="title-text">Hydra IDE</div>
+    <div class="title-right">
+      <button class="title-ai-btn" id="ai-toggle" title="Hydra AI" hidden>
+        <i class="codicon codicon-comment-discussion"></i>
+        <i class="codicon codicon-chevron-down ai-chev"></i>
+      </button>
+      <button class="title-account" id="title-account" title="Cuenta">
+        <i class="codicon codicon-account ta-icon"></i><span class="ta-label">Iniciar sesión</span>
+      </button>
+      <button class="win-btn" id="win-min" title="Minimizar"><i class="codicon codicon-chrome-minimize"></i></button>
+      <button class="win-btn" id="win-max" title="Maximizar"><i class="codicon codicon-chrome-maximize"></i></button>
+      <button class="win-btn close" id="win-close" title="Cerrar"><i class="codicon codicon-chrome-close"></i></button>
+    </div>
+  </div>
+
+  <div id="middle">
+    <!-- Barra de actividad -->
+    <div id="activitybar">
+      <button class="act active" data-view="explorer" title="Explorador (Ctrl+Shift+E)">
+        <i class="codicon codicon-files"></i>
+      </button>
+      <button class="act" data-view="search" title="Buscar (Ctrl+Shift+F)">
+        <i class="codicon codicon-search"></i>
+      </button>
+      <button class="act" data-view="scm" title="Control de código fuente">
+        <i class="codicon codicon-source-control"></i>
+      </button>
+      <button class="act" data-view="debug" title="Ejecutar y depurar">
+        <i class="codicon codicon-debug-alt"></i>
+      </button>
+      <button class="act" id="act-python" data-view="python" title="Python" hidden>
+        <svg class="act-svg" viewBox="0 0 24 24" aria-hidden="true">
+          <g fill="currentColor">
+            <rect x="6" y="2" width="12" height="6" rx="3"/>
+            <rect x="6" y="2" width="6" height="11" rx="3"/>
+            <rect x="6" y="16" width="12" height="6" rx="3"/>
+            <rect x="12" y="11" width="6" height="11" rx="3"/>
+          </g>
+          <circle cx="8.7" cy="5" r="1" fill="var(--activitybar-bg)"/>
+          <circle cx="15.3" cy="19" r="1" fill="var(--activitybar-bg)"/>
+        </svg>
+      </button>
+      <button class="act" id="act-team" data-view="team" title="Programar en equipo" hidden>
+        <i class="codicon codicon-live-share"></i>
+      </button>
+      <button class="act" data-view="ext" title="Extensiones">
+        <i class="codicon codicon-extensions"></i>
+      </button>
+      <button class="act" data-view="updates" title="Hydra Updates">
+        <i class="codicon codicon-cloud-download"></i>
+      </button>
+      <div class="act-spacer"></div>
+      <button class="act" id="act-settings" title="Administrar">
+        <i class="codicon codicon-settings-gear"></i>
+      </button>
+    </div>
+
+    <!-- Barra lateral -->
+    <div id="sidebar">
+      <!-- Vista: Explorador -->
+      <section class="side-view" data-view="explorer">
+        <div class="side-header">
+          <span>Explorador</span>
+          <div class="side-actions" id="explorer-actions" hidden>
+            <button class="icon-btn" id="new-file-btn" title="Nuevo archivo"><i class="codicon codicon-new-file"></i></button>
+            <button class="icon-btn" id="new-folder-btn" title="Nueva carpeta"><i class="codicon codicon-new-folder"></i></button>
+            <button class="icon-btn" id="refresh-btn" title="Actualizar"><i class="codicon codicon-refresh"></i></button>
+            <button class="icon-btn" id="collapse-btn" title="Contraer todo"><i class="codicon codicon-collapse-all"></i></button>
+          </div>
+        </div>
+        <div id="open-editors" hidden>
+          <div class="folder-title" id="open-editors-title">
+            <i class="codicon codicon-chevron-down twisty-oe"></i>
+            <span>Archivos abiertos</span>
+          </div>
+          <div id="open-list"></div>
+        </div>
+        <div id="explorer-empty" class="explorer-empty">
+          <p>Aún no has abierto una carpeta.</p>
+          <button id="btn-open-folder" class="primary-btn">Abrir carpeta</button>
+        </div>
+        <div id="folder-pane" hidden>
+          <div class="folder-title" id="folder-title">
+            <i class="codicon codicon-chevron-down"></i>
+            <span id="folder-name">PROYECTO</span>
+          </div>
+          <div id="tree"></div>
+        </div>
+      </section>
+
+      <!-- Vista: Buscar -->
+      <section class="side-view" data-view="search" hidden>
+        <div class="side-header"><span>Buscar</span></div>
+        <div class="search-pane">
+          <input id="search-input" type="text" placeholder="Buscar" />
+          <div id="search-info" class="search-info"></div>
+          <div id="search-results"></div>
+        </div>
+      </section>
+
+      <!-- Vista: Control de código fuente -->
+      <section class="side-view" data-view="scm" hidden>
+        <div class="side-header"><span>Control de código fuente</span>
+          <div class="side-actions"><button class="icon-btn" id="scm-refresh" title="Actualizar"><i class="codicon codicon-refresh"></i></button></div>
+        </div>
+        <div id="scm-pane"></div>
+      </section>
+      <!-- Vista: Ejecutar y depurar -->
+      <section class="side-view" data-view="debug" hidden>
+        <div class="side-header"><span>Ejecutar y depurar</span></div>
+        <div id="debug-pane"></div>
+      </section>
+      <!-- Vista: Python -->
+      <section class="side-view" data-view="python" hidden>
+        <div class="side-header"><span>Python</span>
+          <div class="side-actions"><button class="icon-btn" id="python-refresh" title="Detectar intérpretes"><i class="codicon codicon-refresh"></i></button></div>
+        </div>
+        <div id="python-pane"></div>
+      </section>
+      <!-- Vista: Programar en equipo -->
+      <section class="side-view" data-view="team" hidden>
+        <div class="side-header"><span>Programar en equipo</span>
+          <div class="side-actions"><button class="icon-btn" id="team-refresh" title="Actualizar"><i class="codicon codicon-refresh"></i></button></div>
+        </div>
+        <div id="team-pane"></div>
+      </section>
+      <section class="side-view" data-view="ext" hidden>
+        <div class="side-header"><span>Extensiones</span></div>
+        <div id="ext-list"></div>
+      </section>
+      <section class="side-view" data-view="updates" hidden>
+        <div class="side-header"><span>Hydra Updates</span>
+          <div class="side-actions"><button class="icon-btn" id="updates-refresh" title="Actualizar"><i class="codicon codicon-refresh"></i></button></div>
+        </div>
+        <div id="updates-list"></div>
+      </section>
+    </div>
+
+    <!-- Divisor redimensionable barra lateral / editor -->
+    <div class="resizer vertical" id="resizer-sidebar"></div>
+
+    <!-- Área del editor -->
+    <main id="editor-area">
+      <div id="tabs"></div>
+      <div id="breadcrumbs" hidden></div>
+
+      <div id="editor-body">
+        <div id="editor-region">
+          <!-- Editor de código: Monaco (el mismo de VS Code) -->
+          <div id="editor-wrap" hidden>
+            <div id="monaco"></div>
+          </div>
+
+          <!-- Detalles de extensión -->
+          <div id="ext-details" hidden></div>
+
+          <!-- Detalles de versión (Hydra Updates) -->
+          <div id="update-details" hidden></div>
+
+          <!-- Panel propio de una extensión (webview aislado) -->
+          <div id="webview-view" hidden></div>
+
+          <!-- Git Graph: grafo de commits y ramas -->
+          <div id="gitgraph-view" hidden></div>
+
+          <!-- Hydra 3D: playground de Three.js -->
+          <div id="threed-view" hidden></div>
+
+
+
+          <!-- Visor de imágenes -->
+          <div id="image-view" hidden>
+            <div class="image-wrap"><img id="image-el" alt="" /></div>
+            <div id="image-info" class="image-info"></div>
+          </div>
+
+          <!-- Pantalla de bienvenida -->
+          <div id="welcome">
+            <div class="welcome-inner">
+              <img src="hydra-logo.svg" class="welcome-logo" alt="Hydra IDE" />
+              <h1>Hydra IDE</h1>
+              <p class="subtitle">Tu editor de código moderno</p>
+              <div class="welcome-actions">
+                <a data-cmd="workbench.openFolder">Abrir carpeta <span class="kb">Ctrl+K Ctrl+O</span></a>
+                <a data-cmd="workbench.quickOpen">Ir al archivo <span class="kb">Ctrl+P</span></a>
+                <a data-cmd="workbench.commandPalette">Paleta de comandos <span class="kb">Ctrl+Shift+P</span></a>
+                <a data-cmd="search.focus">Buscar en archivos <span class="kb">Ctrl+Shift+F</span></a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Divisor redimensionable editor / panel -->
+        <div class="resizer horizontal" id="resizer-panel" hidden></div>
+
+        <!-- Panel inferior -->
+        <div id="panel" hidden>
+          <div id="panel-tabs">
+            <span class="panel-tab active" data-panel="problems">PROBLEMAS</span>
+            <span class="panel-tab" data-panel="output">SALIDA</span>
+            <span class="panel-tab" data-panel="terminal">TERMINAL</span>
+            <div class="panel-spacer"></div>
+            <button class="icon-btn" id="panel-close" title="Cerrar panel"><i class="codicon codicon-close"></i></button>
+          </div>
+          <div class="panel-body" data-panel="problems">No se han detectado problemas en el área de trabajo.</div>
+          <div class="panel-body" data-panel="output" hidden></div>
+          <div class="panel-body" data-panel="terminal" id="terminal-body" hidden><div id="terminal-container"></div></div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Divisor + panel de Hydra AI (a la derecha) -->
+    <div class="resizer vertical" id="resizer-ai" hidden></div>
+    <div id="ai-panel" hidden>
+      <div class="ai-panel-header">
+        <div class="ai-tabs">
+          <button class="ai-tab active" id="ai-tab-hydra"><i class="codicon codicon-sparkle"></i> Hydra AI</button>
+          <button class="ai-tab" id="ai-tab-claude" hidden><img src="ext/claude-code.svg" alt="" class="ai-claude-ic"> Claude Code</button>
+          <button class="ai-tab" id="ai-tab-lumin" hidden><img src="ext/lumin-official.png" alt="" class="ai-claude-ic"> Lumin AI</button>
+        </div>
+        <div class="ai-panel-actions">
+          <button class="icon-btn" id="ai-clear" title="Nuevo chat"><i class="codicon codicon-add"></i></button>
+          <button class="icon-btn" id="ai-close" title="Cerrar"><i class="codicon codicon-close"></i></button>
+        </div>
+      </div>
+      <div id="ai-gate" class="ai-gate" hidden>
+        <i class="codicon codicon-lock"></i>
+        <p>Iniciá sesión con Google para usar <b>Hydra AI</b>.</p>
+        <button id="ai-login-btn" class="primary-btn">Iniciar sesión</button>
+      </div>
+      <div id="ai-chat" class="ai-chat">
+        <div id="ai-messages" class="ai-messages"></div>
+        <div id="ai-attach-preview" class="ai-attach-preview" hidden></div>
+        <div class="claude-input-wrap">
+          <div id="ai-suggest" class="claude-suggest" hidden></div>
+          <div class="ai-composer">
+            <textarea id="ai-input" placeholder="Preguntale a Hydra AI…" rows="1"></textarea>
+            <div class="ai-toolbar">
+              <div class="ai-toolbar-left">
+                <button class="ai-tool-btn" id="ai-attach" title="Adjuntar imagen"><i class="codicon codicon-add"></i></button>
+                <button class="ai-tool-btn claude-only" id="ai-slash" title="Comandos"><i class="codicon codicon-terminal"></i></button>
+                <button class="ai-tool-btn claude-only" id="ai-model" title="Modelo"><img src="ext/claude-code.svg" alt="" class="ai-claude-ic"><span id="ai-model-name">Sonnet</span></button>
+                <button class="ai-tool-btn lumin-only" id="ai-lumin-model" title="Modelo de Lumin"><i class="codicon codicon-chip"></i><span id="ai-lumin-model-name">Lumin Vera 3</span></button>
+              </div>
+              <div class="ai-toolbar-right">
+                <button class="ai-tool-btn claude-only" id="ai-cmode" title="Modo de permisos"><i class="codicon codicon-zap"></i><span id="ai-cmode-name">Preguntar</span></button>
+                <button id="ai-send" class="ai-send" title="Enviar"><i class="codicon codicon-arrow-up"></i></button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <input type="file" id="ai-file" accept="image/*" hidden />
+      </div>
+      <div id="ai-cmode-menu" class="dropdown" hidden></div>
+      <div id="ai-model-menu" class="dropdown" hidden></div>
+      <div id="ai-lumin-model-menu" class="dropdown" hidden></div>
+    </div>
+
+  </div>
+
+  <!-- Barra de estado -->
+  <div id="statusbar">
+    <div class="status-left">
+      <span class="status-item" id="status-problems" title="No hay problemas">
+        <i class="codicon codicon-error"></i> <span id="err-count">0</span>
+        <i class="codicon codicon-warning"></i> <span id="warn-count">0</span>
+      </span>
+      <span class="status-item" id="status-branch"><i class="codicon codicon-git-branch"></i> main</span>
+      <span class="status-item" id="status-core"><i class="codicon codicon-circle-filled"></i> Listo</span>
+    </div>
+    <div class="status-right">
+      <span class="status-item" id="status-pos" title="Ir a la línea/columna">Ln 1, Col 1</span>
+      <span class="status-item" id="status-indent" title="Seleccionar indentación">Espacios: 4</span>
+      <span class="status-item" id="status-encoding" title="Seleccionar codificación">UTF-8</span>
+      <span class="status-item" id="status-eol" title="Seleccionar fin de línea">LF</span>
+      <span class="status-item" id="status-lang" title="Seleccionar lenguaje">Texto sin formato</span>
+      <span class="status-item" id="status-copilot" title="Hydra Assist" hidden><i class="codicon codicon-sparkle"></i> Assist</span>
+      <span class="status-item" id="status-python" title="Seleccionar intérprete de Python" hidden><i class="codicon codicon-symbol-misc"></i> Python</span>
+      <span class="status-item" id="status-git" title="Ver el grafo de commits (Git Graph)" hidden><i class="codicon codicon-git-commit"></i> Git Graph</span>
+      <span class="status-item" id="status-live" title="Servir la carpeta con Hydra Live" hidden><i class="codicon codicon-broadcast"></i> Go Live</span>
+      <span class="status-item" id="status-themes" title="Cambiar el tema de color" hidden><i class="codicon codicon-symbol-color"></i> Temas</span>
+      <span class="status-item" id="status-3d" title="Hydra 3D — playground 3D" hidden><i class="codicon codicon-globe"></i> 3D</span>
+      <span class="status-item" id="status-wordcount" title="Palabras y caracteres del archivo" hidden></span>
+      <span class="status-item" id="status-zen" title="Modo Zen (enfoque)" hidden><i class="codicon codicon-screen-full"></i> Zen</span>
+      <span class="status-item" id="status-power" title="Power Mode (efectos al escribir)" hidden><i class="codicon codicon-zap"></i> Power</span>
+      <span class="status-item" id="status-clock" title="Reloj" hidden><i class="codicon codicon-watch"></i> --:--</span>
+      <span class="status-item" id="status-bell" title="Notificaciones"><i class="codicon codicon-bell"></i></span>
+    </div>
+  </div>
+
+  <!-- Menú emergente de la barra de estado (se abre hacia arriba) -->
+  <div id="popup-menu" class="dropdown" hidden></div>
+
+  <!-- Capa de menús desplegables -->
+  <div id="menu-dropdown" class="dropdown" hidden></div>
+
+  <!-- Menú contextual (clic derecho) -->
+  <div id="context-menu" class="dropdown" hidden></div>
+
+  <!-- Quick input: paleta de comandos / quick open -->
+  <div id="quick-overlay" class="overlay" hidden>
+    <div id="quick-box">
+      <input id="quick-input" type="text" />
+      <div id="quick-list"></div>
+    </div>
+  </div>
+
+  <!-- Modal genérico (input / confirmación) -->
+  <div id="modal-overlay" class="overlay" hidden>
+    <div id="modal-box">
+      <div id="modal-title"></div>
+      <input id="modal-input" type="text" />
+      <div id="modal-message"></div>
+      <div id="modal-buttons"></div>
+    </div>
+  </div>
+
+  <!-- Menú de cuenta (se ancla bajo el botón de la barra de título) -->
+  <div id="account-menu" class="dropdown" hidden></div>
+  <!-- Menú de selección de agente de IA -->
+
+  <!-- Overlay de inicio de sesión -->
+  <div id="login-overlay" class="overlay" hidden>
+    <div id="login-box">
+      <img src="hydra-logo.svg" class="login-logo" alt="" />
+      <h2>Iniciar sesión en Hydra IDE</h2>
+      <p class="login-sub">Accedé a tu perfil y llevá tu cuenta a donde vayas.</p>
+      <button id="login-google" class="google-btn">
+        <img src="google.svg" alt="" /> Continuar con Google
+      </button>
+      <div id="login-error" class="login-error" hidden></div>
+      <button id="login-close" class="login-cancel">Cancelar</button>
+    </div>
+  </div>
+
+  <!-- Modal de perfil -->
+  <div id="profile-overlay" class="overlay" hidden>
+    <div id="profile-box">
+      <div class="profile-head">
+        <img id="profile-avatar" class="profile-avatar" alt="" />
+        <div class="profile-head-info">
+          <input id="profile-display" class="profile-input" placeholder="Nombre visible" />
+          <div class="profile-email" id="profile-email"></div>
+        </div>
+      </div>
+      <label class="profile-label">Usuario</label>
+      <input id="profile-username" class="profile-input" placeholder="usuario" />
+      <div id="profile-username-status" class="uname-status"></div>
+      <label class="profile-label">Biografía</label>
+      <textarea id="profile-bio" class="profile-input" rows="3" placeholder="Contá algo sobre vos..."></textarea>
+      <label class="profile-label">Foto de perfil (URL)</label>
+      <input id="profile-photo" class="profile-input" placeholder="https://..." />
+      <div class="profile-actions">
+        <button id="profile-logout" class="ghost-btn"><i class="codicon codicon-sign-out"></i> Cerrar sesión</button>
+        <span class="spacer"></span>
+        <button id="profile-cancel">Cancelar</button>
+        <button id="profile-save" class="primary">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notificaciones (toasts) -->
+  <div id="toast-host"></div>
+
+  <!-- Idioma de la interfaz (automático según el equipo). Debe ir antes que el
+       renderer para traducir el DOM estático apenas se parsea y evitar parpadeo. -->
+  <script src="i18n.js"></script>
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script src="vendor/firebase-app-compat.js"></script>
+  <script src="vendor/firebase-auth-compat.js"></script>
+  <script src="vendor/supabase.js"></script>
+  <script src="auth-config.js"></script>
+  <script src="auth.js"></script>
+  <!-- Monaco Editor (el editor de VS Code). El loader AMD expone `require`. -->
+  <!-- Hydra 3D (Three.js): ANTES del loader de Monaco para que quede como global
+       (window.THREE) y no se registre como módulo AMD (rompe con define.amd). -->
+  <script src="vendor/three.min.js"></script>
+  <script src="monaco-env.js"></script>
+  <script src="vendor/monaco/vs/loader.js"></script>
+  <script src="renderer.js"></script>
+  <script src="lumin.js"></script>
+</body>
+</html>

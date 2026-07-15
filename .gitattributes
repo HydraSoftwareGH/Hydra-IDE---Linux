@@ -1,0 +1,15 @@
+# Normaliza saltos de línea. Scripts y YAML SIEMPRE con LF para que funcionen
+# en los runners Linux del workflow.
+* text=auto eol=lf
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.js   text eol=lf
+*.cpp  text eol=lf
+*.json text eol=lf
+
+# Binarios (sin conversión de EOL)
+*.png binary
+*.ico binary
+*.svg text eol=lf
+*.node binary

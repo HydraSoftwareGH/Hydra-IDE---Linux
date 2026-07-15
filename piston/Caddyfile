@@ -1,0 +1,19 @@
+# Proxy CORS delante de la API de Piston, para que el IDE web (otro origen)
+# pueda ejecutar código. Reenvía a piston_api:2000 y agrega cabeceras CORS.
+:2001 {
+	# Preflight OPTIONS → responder 204 con las cabeceras CORS.
+	@preflight method OPTIONS
+	handle @preflight {
+		header Access-Control-Allow-Origin "*"
+		header Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		header Access-Control-Allow-Headers "Content-Type, Authorization"
+		header Access-Control-Max-Age "86400"
+		respond 204
+	}
+
+	# Resto de peticiones: agregar CORS y reenviar a la API.
+	header Access-Control-Allow-Origin "*"
+	header Access-Control-Allow-Methods "GET, POST, OPTIONS"
+	header Access-Control-Allow-Headers "Content-Type, Authorization"
+	reverse_proxy piston_api:2000
+}

@@ -1,0 +1,8 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <rect width="64" height="64" rx="14" fill="#101622"/>
+  <!-- Cubo isométrico -->
+  <path d="M32 12 L52 23 L52 41 L32 52 L12 41 L12 23 Z" fill="none" stroke="#3b8eea" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="M32 12 L52 23 L32 34 L12 23 Z" fill="#7c6bff" opacity="0.85"/>
+  <path d="M32 34 L52 23 L52 41 L32 52 Z" fill="#3b8eea" opacity="0.8"/>
+  <path d="M32 34 L12 23 L12 41 L32 52 Z" fill="#2ff0c4" opacity="0.75"/>
+</svg>

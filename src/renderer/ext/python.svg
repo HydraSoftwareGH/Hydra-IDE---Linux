@@ -1,0 +1,25 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Rendition propia y simplificada del motivo de dos ganchos entrelazados
+       con simetría rotacional, en los colores azul/amarillo. -->
+  <defs>
+    <linearGradient id="pyBlue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5fa0d8"/><stop offset="1" stop-color="#356fa6"/>
+    </linearGradient>
+    <linearGradient id="pyYellow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe066"/><stop offset="1" stop-color="#ffc83d"/>
+    </linearGradient>
+  </defs>
+  <!-- Gancho superior (azul) -->
+  <g fill="url(#pyBlue)">
+    <rect x="16" y="6"  width="32" height="17" rx="8.5"/>
+    <rect x="16" y="6"  width="17" height="34" rx="8.5"/>
+  </g>
+  <!-- Gancho inferior (amarillo), simetría 180° -->
+  <g fill="url(#pyYellow)">
+    <rect x="16" y="41" width="32" height="17" rx="8.5"/>
+    <rect x="31" y="24" width="17" height="34" rx="8.5"/>
+  </g>
+  <!-- Ojos -->
+  <circle cx="24" cy="14" r="2.5" fill="#fff"/>
+  <circle cx="40" cy="50" r="2.5" fill="#fff"/>
+</svg>

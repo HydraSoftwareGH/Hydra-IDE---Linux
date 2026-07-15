@@ -1,0 +1,19 @@
+# Dependencias e outputs de compilación (se regeneran en el runner de CI)
+node_modules/
+build/
+dist/
+dist-*/
+*.log
+
+# Archivos temporales/logs sueltos del entorno local
+_*.txt
+_startout
+*.tmp
+
+# Sitio web (proyecto aparte, no necesario para el build de Linux; además
+# website/public es un repo git embebido)
+website/
+
+# Sistema
+.DS_Store
+Thumbs.db

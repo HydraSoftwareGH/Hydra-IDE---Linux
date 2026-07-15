@@ -1,0 +1,89 @@
+/* ===========================================================================
+   web.css — Ajustes SÓLO para Hydra IDE corriendo en el navegador (/ide).
+   Se aplica cuando <body> tiene la clase .web-mode (la agrega web-api.js).
+
+   Oculta la interfaz que depende del proceso nativo de Electron (controles de
+   ventana, terminal, git, ejecutar/depurar, actualizaciones, IA) para que no
+   queden botones que fallen. El resto del IDE (editor Monaco, explorador con
+   acceso real a carpetas, búsqueda, extensiones, cuenta) funciona igual.
+   =========================================================================== */
+
+/* --- Controles de ventana (minimizar/maximizar/cerrar): el navegador ya los
+       provee en su propia barra --- */
+.web-mode .win-btn { display: none !important; }
+
+/* --- Botón de IA en la barra de título (Groq/Claude): desactivado en web --- */
+.web-mode #ai-toggle { display: none !important; }
+
+/* --- Barra de actividad: ocultar vistas que necesitan proceso local --- */
+.web-mode #activitybar .act[data-view="scm"],
+.web-mode #activitybar .act[data-view="debug"],
+.web-mode #activitybar .act[data-view="updates"] { display: none !important; }
+
+/* --- Panel inferior: la pestaña TERMINAL SÍ aplica en el navegador ---
+   Es una shell propia (web-api.js) que opera sobre los archivos reales
+   abiertos con la File System Access API. Por eso NO la ocultamos. --- */
+
+/* --- Ítems de la barra de estado que dependen de lo nativo ---
+   #status-live (Go Live) SÍ se muestra: web-api.js implementa una vista previa
+   en el navegador (blob URLs resueltos desde la File System Access API). Git y
+   Python siguen ocultos porque necesitan binarios locales. --- */
+.web-mode #status-python,
+.web-mode #status-git { display: none !important; }
+
+/* ===========================================================================
+   Overlay para navegadores sin File System Access API (Firefox/Safari).
+   web-api.js inyecta el nodo #web-unsupported.
+   =========================================================================== */
+#web-unsupported {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(10, 12, 16, 0.86);
+  backdrop-filter: blur(6px);
+}
+#web-unsupported .wu-box {
+  max-width: 460px;
+  width: 100%;
+  text-align: center;
+  background: #1b1e26;
+  border: 1px solid #2c3140;
+  border-radius: 14px;
+  padding: 32px 28px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  color: #e6e8ee;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+#web-unsupported .wu-logo { width: 56px; height: 56px; margin-bottom: 12px; }
+#web-unsupported h2 { font-size: 20px; margin: 0 0 12px; }
+#web-unsupported p { font-size: 14px; line-height: 1.55; color: #aab0bd; margin: 0 0 12px; }
+#web-unsupported b { color: #e6e8ee; }
+#web-unsupported .wu-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+#web-unsupported .wu-btn {
+  display: inline-block;
+  padding: 10px 18px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: #3b82f6;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+#web-unsupported .wu-btn.ghost {
+  background: transparent;
+  border-color: #3c4353;
+  color: #cdd2dd;
+}
+#web-unsupported .wu-btn:hover { filter: brightness(1.08); }

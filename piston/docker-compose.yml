@@ -1,0 +1,39 @@
+# =============================================================================
+# Piston self-hosted para Hydra IDE (terminal web · comando `run`).
+#
+# La API pública emkc.org quedó whitelist-only (15/02/2026), así que para
+# ejecutar código de verdad desde el IDE web hay que correr Piston localmente.
+#
+#   1) docker compose up -d
+#   2) instalá lenguajes:   bash install-langs.sh   (o ver README.md)
+#   3) en la terminal del IDE web:  piston url http://localhost:2001/api/v2
+#   4) probá:  run archivo.py   /   node archivo.js   /   python archivo.py
+#
+# El servicio `proxy` (Caddy) agrega cabeceras CORS para que el navegador
+# (otro origen: /ide) pueda llamar a la API de Piston (localhost). El IDE debe
+# apuntar al proxy (:2001), NO directo a la API (:2000).
+# Repo oficial: https://github.com/engineer-man/piston
+# =============================================================================
+services:
+  api:
+    image: ghcr.io/engineer-man/piston
+    container_name: piston_api
+    restart: always
+    privileged: true                 # isolate necesita capacidades extra
+    volumes:
+      - ./data/piston/packages:/piston/packages
+    tmpfs:
+      - /piston/jobs:exec,uid=1000,gid=1000
+    ports:
+      - "2000:2000"                  # API directa (sin CORS) — para curl/instalar paquetes
+
+  proxy:
+    image: caddy:2
+    container_name: piston_proxy
+    restart: always
+    depends_on:
+      - api
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "2001:2001"                  # API con CORS — usá esta desde el IDE web

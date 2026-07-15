@@ -1,0 +1,96 @@
+{
+  "name": "hydra-ide",
+  "productName": "Hydra IDE",
+  "version": "0.2.3",
+  "description": "Hydra IDE — editor de código estilo VS Code construido con Electron y un núcleo en C++ (N-API)",
+  "main": "src/main.js",
+  "scripts": {
+    "build:native": "node-gyp rebuild",
+    "start": "node scripts/start.js",
+    "dev": "npm run build:native && node scripts/start.js",
+    "build:web": "node scripts/build-web-ide.js",
+    "serve:web": "node scripts/serve-web.js",
+    "dist": "electron-builder",
+    "release": "electron-builder --publish always"
+  },
+  "author": "Santiago",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.193",
+    "@supabase/supabase-js": "^2.108.2",
+    "@vscode/codicons": "^0.0.45",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "adm-zip": "^0.5.17",
+    "electron-updater": "^6.8.9",
+    "firebase": "^12.15.0",
+    "monaco-editor": "^0.52.2",
+    "node-addon-api": "^8.3.0",
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3",
+    "node-gyp": "^11.0.0",
+    "prettier": "^3.8.4"
+  },
+  "build": {
+    "appId": "com.hydrasoft.hydraide",
+    "productName": "Hydra IDE",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "compression": "maximum",
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/Release/*.node",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/node-pty/**"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "shortcutName": "Hydra IDE"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}",
+      "icon": "build/icon.png",
+      "category": "Development",
+      "maintainer": "Hydra Software <hydrasoftwareoficial@gmail.com>",
+      "synopsis": "Editor de código estilo VS Code con núcleo en C++",
+      "description": "Hydra IDE — editor de código moderno estilo VS Code con terminal real, Live Server, Git Graph, Python y más."
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "HydraSoftwareGH",
+        "repo": "Hydra-Updates---IDE"
+      }
+    ]
+  }
+}

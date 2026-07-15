@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Hydra IDE — Google</title>
+<style>
+  html,body { height: 100%; margin: 0; }
+  body { font-family: "Segoe UI", system-ui, sans-serif; background: #14151b; color: #c8ccda;
+         display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+  .spinner { width: 34px; height: 34px; border: 3px solid #2a2d36; border-top-color: #7c6bff;
+             border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #status { font-size: 14px; color: #9aa0b8; }
+  .ok { color: #4ade80 !important; } .err { color: #ff8089 !important; }
+  button { margin-top: 8px; background: #fff; color: #1f1f1f; border: none; border-radius: 8px;
+           padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; display: none; }
+</style>
+</head>
+<body>
+  <div class="spinner" id="spin"></div>
+  <p id="status">Conectando con Google…</p>
+  <button id="retry">Reintentar</button>
+
+  <script src="vendor/firebase-app-compat.js"></script>
+  <script src="vendor/firebase-auth-compat.js"></script>
+  <script src="auth-config.js"></script>
+  <script>
+    firebase.initializeApp(FIREBASE_CONFIG);
+    const auth = firebase.auth();
+    const provider = new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const statusEl = document.getElementById('status');
+    const retryBtn = document.getElementById('retry');
+    const spin = document.getElementById('spin');
+
+    function toGoogle() {
+      retryBtn.style.display = 'none';
+      spin.style.display = 'block';
+      statusEl.className = ''; statusEl.textContent = 'Abriendo Google…';
+      sessionStorage.setItem('hydra-returning', '1');
+      auth.signInWithRedirect(provider); // salta DIRECTO a Google, sin esperar red
+    }
+
+    async function processReturn() {
+      try {
+        const result = await auth.getRedirectResult();
+        if (result && result.credential) {
+          spin.style.display = 'none';
+          statusEl.className = 'ok';
+          statusEl.textContent = 'Listo. Volvé a Hydra IDE.';
+          await fetch('/__authcb', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idToken: result.credential.idToken, accessToken: result.credential.accessToken }),
+          });
+        } else { toGoogle(); }
+      } catch (e) {
+        spin.style.display = 'none';
+        statusEl.className = 'err';
+        statusEl.textContent = 'No se pudo: ' + (e && e.message ? e.message : e);
+        retryBtn.style.display = 'inline-block';
+      }
+    }
+
+    // Primera carga → directo a Google (sin llamada de red previa).
+    // Al volver de Google → procesar el resultado.
+    if (sessionStorage.getItem('hydra-returning')) {
+      sessionStorage.removeItem('hydra-returning');
+      processReturn();
+    } else {
+      toGoogle();
+    }
+
+    retryBtn.onclick = toGoogle;
+  </script>
+</body>
+</html>

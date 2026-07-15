@@ -1,0 +1,98 @@
+name: Build Linux (tar.gz x64 + arm64)
+
+# Compila los módulos nativos EN Linux (node-pty + hydra_core, ambos N-API) y
+# empaqueta Hydra IDE como .tar.gz para x86_64 y ARM64. Al hacerse la compilación
+# en runners Linux reales, la terminal integrada (node-pty) SÍ funciona.
+#
+# Disparadores:
+#   - Manual desde la pestaña Actions (workflow_dispatch)
+#   - Al empujar un tag v* (ej. v0.2.3) -> además crea un Release con los tarballs
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # necesario para crear el Release al empujar un tag
+
+jobs:
+  build:
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm   # runner ARM64 nativo de GitHub
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar toolchain de compilación (node-gyp)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential python3 make g++
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Compilar núcleo C++ (hydra_core, N-API)
+        run: npm run build:native
+
+      - name: Compilar node-pty desde fuente (Linux ${{ matrix.arch }})
+        run: |
+          cd node_modules/node-pty
+          npx node-gyp rebuild
+
+      - name: Preparar icono de Linux
+        run: |
+          mkdir -p build
+          cp "Hydra IDE.png" build/icon.png
+
+      - name: Empaquetar tar.gz (${{ matrix.arch }})
+        run: npx electron-builder --linux tar.gz --${{ matrix.arch }} --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verificar que los binarios nativos son ELF de Linux
+        run: |
+          echo "== hydra_core =="
+          file build/Release/hydra_core.node || true
+          echo "== node-pty =="
+          find node_modules/node-pty -name '*.node' -exec file {} \; || true
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: hydra-ide-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publicar Release (solo en tags)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Descargar todos los artefactos
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Crear/actualizar Release con los tarballs
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.tar.gz
+          fail_on_unmatched_files: true
