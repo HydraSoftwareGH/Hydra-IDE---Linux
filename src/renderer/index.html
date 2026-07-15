@@ -242,7 +242,13 @@
           </div>
           <div class="panel-body" data-panel="problems">No se han detectado problemas en el área de trabajo.</div>
           <div class="panel-body" data-panel="output" hidden></div>
-          <div class="panel-body" data-panel="terminal" id="terminal-body" hidden><div id="terminal-container"></div></div>
+          <div class="panel-body" data-panel="terminal" id="terminal-body" hidden>
+            <div id="term-tabs">
+              <div id="term-tabs-list"></div>
+              <button class="icon-btn term-new" id="term-new" title="Nueva terminal (Ctrl+Shift+&#96;)"><i class="codicon codicon-add"></i></button>
+            </div>
+            <div id="term-panes"></div>
+          </div>
         </div>
       </div>
     </main>

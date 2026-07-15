@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('api', {
   termStart: (cwd, cols, rows, sessionId, command) => ipcRenderer.invoke('term:start', cwd, cols, rows, sessionId || 'main', command),
   termInput: (data, sessionId) => ipcRenderer.invoke('term:input', data, sessionId || 'main'),
   termResize: (cols, rows, sessionId) => ipcRenderer.invoke('term:resize', cols, rows, sessionId || 'main'),
+  termKill: (sessionId) => ipcRenderer.invoke('term:kill', sessionId || 'main'),
 
   // Portapapeles nativo (fiable, sin depender de navigator.clipboard)
   clipboardWrite: (text) => { try { clipboard.writeText(String(text)); return true; } catch { return false; } },
@@ -92,8 +93,19 @@ contextBridge.exposeInMainWorld('api', {
 
   // Hydra Team (colaboración): carpeta local del grupo
   teamDir: (code) => ipcRenderer.invoke('team:dir', code),
-  onTermData: (cb, sessionId) => ipcRenderer.on('term:data:' + (sessionId || 'main'), (_e, data) => cb(data)),
-  onTermExit: (cb, sessionId) => ipcRenderer.on('term:exit:' + (sessionId || 'main'), (_e, code) => cb(code)),
+  // Devuelven un "disposer" para quitar el listener al cerrar la terminal (multi-terminal).
+  onTermData: (cb, sessionId) => {
+    const ch = 'term:data:' + (sessionId || 'main');
+    const h = (_e, data) => cb(data);
+    ipcRenderer.on(ch, h);
+    return () => ipcRenderer.removeListener(ch, h);
+  },
+  onTermExit: (cb, sessionId) => {
+    const ch = 'term:exit:' + (sessionId || 'main');
+    const h = (_e, code) => cb(code);
+    ipcRenderer.on(ch, h);
+    return () => ipcRenderer.removeListener(ch, h);
+  },
 
   // Claude Code: ¿está instalado el CLI `claude`?
   claudeDetect: () => ipcRenderer.invoke('claude:detect'),

@@ -365,9 +365,9 @@ async function openFolderPath(dir) {
 // Mueve el shell de la terminal a un directorio (como hace VS Code al abrir
 // una carpeta). Si la terminal aún no arrancó, arrancará directo ahí.
 function termChdir(dir) {
-  if (!dir || !termStarted) return;
+  if (!dir || !activeTermStarted()) return;
   const cmd = navigator.platform.startsWith('Win') ? `cd /d "${dir}"\r` : `cd "${dir}"\r`;
-  window.api.termInput(cmd);
+  window.api.termInput(cmd, activeTermSession());
 }
 
 // --------------------------------------------------------------------------
@@ -1225,7 +1225,8 @@ const menuDefs = {
     { label: 'Ir a la línea...', kb: 'Ctrl+G', action: () => showGoToLine() },
   ],
   ejecutar: [
-    { label: 'Nueva terminal', kb: 'Ctrl+`', action: () => openTerminalPanel() },
+    { label: 'Nueva terminal', kb: 'Ctrl+Shift+`', action: () => { openTerminalPanel(); createTerminal(); } },
+    { label: 'Alternar terminal', kb: 'Ctrl+`', action: () => openTerminalPanel() },
     { label: 'Alternar panel', kb: '', action: () => togglePanel() },
   ],
   ayuda: [
@@ -1451,7 +1452,8 @@ const commandDefs = [
   { label: 'Buscar en archivos', icon: 'search', cmd: () => showView('search') },
   { label: 'Alternar barra lateral', icon: 'layout-sidebar-left', cmd: () => toggleSidebar() },
   { label: 'Alternar panel', icon: 'layout-panel', cmd: () => togglePanel() },
-  { label: 'Terminal: Nueva terminal', icon: 'terminal', cmd: () => openTerminalPanel() },
+  { label: 'Terminal: Nueva terminal', icon: 'terminal', cmd: () => { openTerminalPanel(); createTerminal(); } },
+  { label: 'Terminal: Alternar terminal', icon: 'terminal', cmd: () => openTerminalPanel() },
   { label: 'Live Server: Iniciar / Detener (Go Live)', icon: 'broadcast', cmd: () => toggleLive() },
   { label: 'Git Graph: Ver grafo de commits', icon: 'git-commit', cmd: () => openGitGraph() },
   { label: 'Prettier: Formatear documento', icon: 'symbol-color', cmd: () => formatActiveDocument() },
@@ -1699,6 +1701,8 @@ document.querySelectorAll('.panel-tab').forEach((tab) => {
 });
 
 el('panel-close').addEventListener('click', togglePanel);
+// Botón "+" de la barra de terminales: crea una terminal nueva.
+el('term-new').addEventListener('click', () => { openTerminalPanel(); createTerminal(); });
 
 // --------------------------------------------------------------------------
 // Lenguaje según extensión
@@ -1981,12 +1985,13 @@ function applyAccent(hex) {
 }
 
 function applyTermSettings() {
-  if (!term) return;
-  try {
-    term.options.fontSize = appSettings.termFont;
-    term.options.cursorBlink = appSettings.termCursorBlink;
-    if (fitAddon) { fitAddon.fit(); window.api.termResize(term.cols, term.rows); }
-  } catch {}
+  for (const T of terminals.values()) {
+    try {
+      T.term.options.fontSize = appSettings.termFont;
+      T.term.options.cursorBlink = appSettings.termCursorBlink;
+      if (T.id === activeTermId) { T.fitAddon.fit(); window.api.termResize(T.term.cols, T.term.rows, T.sessionId); }
+    } catch {}
+  }
 }
 
 function applySettings(s) {
@@ -2230,6 +2235,14 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
+  // Ctrl+Shift+` — Nueva terminal (como VS Code)
+  if (ctrl && shift && e.key === '`') {
+    e.preventDefault();
+    openTerminalPanel();
+    createTerminal();
+    return;
+  }
+
   // Ctrl+` — Alternar terminal
   if (ctrl && e.key === '`') {
     e.preventDefault();
@@ -2336,19 +2349,27 @@ window.addEventListener('keydown', (e) => {
 // --------------------------------------------------------------------------
 // Terminal integrada (xterm + PTY real node-pty/ConPTY — igual que VS Code)
 // --------------------------------------------------------------------------
-let term = null, fitAddon = null, termStarted = false;
-let savedTermScrollback = '';   // contenido restaurado de la sesión anterior
-let termBuffer = '';            // scrollback acumulado para persistir
+// Varias terminales a la vez (como VS Code). Cada una tiene su propio xterm y su
+// PTY (sessionId único). La primera usa la sesión 'main' (compatibilidad con el
+// scrollback guardado); las siguientes 'term-2', 'term-3', …
+const terminals = new Map();    // id -> { id, sessionId, term, fitAddon, container, started, buffer, exited, name, dataOff, exitOff, resizeObs }
+let activeTermId = null;
+let termSeq = 0;
+let savedTermScrollback = '';   // scrollback restaurado (solo la 1ª terminal)
 
-function initTerminal() {
-  if (term) return;
-  term = new Terminal({
+const termBaseName = () => ((window.api && window.api.platform === 'win32') ? 'cmd' : 'bash');
+function activeTerminal() { return activeTermId ? terminals.get(activeTermId) : null; }
+function activeTermSession() { const t = activeTerminal(); return t ? t.sessionId : 'main'; }
+function activeTermStarted() { const t = activeTerminal(); return !!(t && t.started); }
+
+// xterm con las opciones/tema comunes (paleta ANSI igual a VS Code, tema oscuro).
+function makeXterm() {
+  return new Terminal({
     fontFamily: '"Cascadia Code", "Consolas", monospace',
     fontSize: appSettings.termFont,
     cursorBlink: appSettings.termCursorBlink,
-    scrollback: 8000,     // historial para poder scrollear
+    scrollback: 8000,
     scrollOnUserInput: true,
-    // Paleta ANSI idéntica al terminal integrado de VS Code (tema oscuro).
     theme: {
       background: '#14151b',
       foreground: '#c8ccda',
@@ -2362,31 +2383,11 @@ function initTerminal() {
       brightCyan: '#29b8db', brightWhite: '#e5e5e5',
     },
   });
-  fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(el('terminal-container'));
-  try { fitAddon.fit(); } catch {}
+}
 
-  // Restaurar el scrollback de la sesión anterior (si lo hay).
-  // OJO: lo guardado es historial para MOSTRAR, no para re-ejecutar. Si contenía
-  // secuencias que cambian modos (mouse tracking, pantalla alterna, bracketed
-  // paste), al reescribirlas la terminal nueva quedaría en ese modo y se
-  // DESACTIVARÍA la selección con el mouse. Por eso las quitamos del historial.
-  if (savedTermScrollback) {
-    const clean = savedTermScrollback.replace(/\x1b\[\?[0-9;]*[hl]/g, ''); // quita modos DEC privados
-    termBuffer = clean;
-    term.write(clean);
-    term.write('\r\n\x1b[90m──── (sesión anterior ↑ · terminal nueva ↓) ────\x1b[0m\r\n');
-    savedTermScrollback = '';
-  }
-  // Defensa extra: apagar explícitamente el modo mouse y la pantalla alterna,
-  // por si la sesión viva los hubiera dejado activos (rompe la selección).
-  term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?25h');
-
-  // Copiar/pegar estilo VS Code, usando el portapapeles NATIVO de Electron.
-  //  · Ctrl+C con selección → copia (sin selección cae al PTY como interrupción).
-  //  · Ctrl+Shift+C → copia siempre que haya selección.
-  //  · Ctrl+V / Ctrl+Shift+V → pega.
+// Copiar/pegar (portapapeles nativo) + menú contextual para UNA terminal.
+function wireTermClipboard(T) {
+  const term = T.term;
   const termCopy = () => {
     if (!term.hasSelection()) return false;
     window.api.clipboardWrite(term.getSelection());
@@ -2395,7 +2396,7 @@ function initTerminal() {
   };
   const termPaste = () => {
     const text = window.api.clipboardRead();
-    if (text) window.api.termInput(text);
+    if (text) window.api.termInput(text, T.sessionId);
   };
   term.attachCustomKeyEventHandler((ev) => {
     if (ev.type !== 'keydown') return true;
@@ -2406,35 +2407,200 @@ function initTerminal() {
     if (ctrl && k === 'v') { termPaste(); return false; }
     return true;
   });
-
-  // Menú de clic derecho: Copiar / Pegar / Seleccionar todo.
-  el('terminal-container').addEventListener('contextmenu', (ev) => {
+  T.container.addEventListener('contextmenu', (ev) => {
     ev.preventDefault();
-    showTermMenu(ev.clientX, ev.clientY, termCopy, termPaste);
+    showTermMenu(ev.clientX, ev.clientY, term, termCopy, termPaste);
   });
-
-  // Conexión directa con el PTY: cada tecla va al shell, cada byte del shell
-  // se muestra. El eco, el historial, el prompt y Ctrl+C los hace el PTY.
-  term.onData((d) => window.api.termInput(d));
-  window.api.onTermData((data) => {
-    term.write(data);
-    termBuffer += data;                                   // acumular para persistir
-    if (termBuffer.length > 80000) termBuffer = termBuffer.slice(-60000);
-    saveState({ terminalScrollback: termBuffer });
-  });
-  window.api.onTermExit(() => {
-    term.writeln('\r\n\x1b[90m[el proceso terminó — abre una nueva terminal]\x1b[0m');
-    termStarted = false;
-  });
-
-  // Redimensionado real: avisamos al PTY las nuevas columnas/filas.
-  new ResizeObserver(() => {
-    try { fitAddon.fit(); window.api.termResize(term.cols, term.rows); } catch {}
-  }).observe(el('terminal-container'));
 }
 
-// Menú contextual de la terminal (Copiar / Pegar / Seleccionar todo).
-function showTermMenu(x, y, doCopy, doPaste) {
+// Crea una terminal nueva (xterm + PTY con sesión propia) y la activa.
+function createTerminal() {
+  const first = terminals.size === 0;
+  const id = 'T' + (++termSeq);
+  const sessionId = first ? 'main' : ('term-' + termSeq);
+  const container = document.createElement('div');
+  container.className = 'term-pane';
+  el('term-panes').appendChild(container);
+
+  const term = makeXterm();
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+  try { fitAddon.fit(); } catch {}
+
+  const T = {
+    id, sessionId, term, fitAddon, container, started: false, buffer: '', exited: false,
+    baseName: termBaseName(),   // 'cmd' / 'bash' — SIN número
+    lineBuf: '', runningCmd: null, tabEl: null, _label: null,
+    dataOff: null, exitOff: null, resizeObs: null,
+  };
+  terminals.set(id, T);
+
+  // Restaurar el scrollback de la sesión anterior (solo la primera terminal).
+  // Se limpian las secuencias de modos DEC privados (mouse/pantalla alterna/
+  // bracketed paste) para que no rompan la selección con el mouse.
+  if (first && savedTermScrollback) {
+    const clean = savedTermScrollback.replace(/\x1b\[\?[0-9;]*[hl]/g, '');
+    T.buffer = clean;
+    term.write(clean);
+    term.write('\r\n\x1b[90m──── (sesión anterior ↑ · terminal nueva ↓) ────\x1b[0m\r\n');
+    savedTermScrollback = '';
+  }
+  term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?25h');
+
+  wireTermClipboard(T);
+
+  // Conexión directa con el PTY de esta sesión. Además rastreamos el comando que
+  // se ejecuta para renombrar la pestaña (como VS Code).
+  term.onData((d) => { trackTermInput(T, d); window.api.termInput(d, T.sessionId); });
+  T.dataOff = window.api.onTermData((data) => {
+    term.write(data);
+    T.buffer += data;
+    if (T.buffer.length > 80000) T.buffer = T.buffer.slice(-60000);
+    if (T.sessionId === 'main') saveState({ terminalScrollback: T.buffer }); // solo persiste la principal
+    // Cuando vuelve el prompt del shell, la pestaña vuelve a su nombre base.
+    if (T.runningCmd && looksLikePrompt(data)) { T.runningCmd = null; refreshTermLabel(T); }
+  }, T.sessionId);
+  T.exitOff = window.api.onTermExit(() => {
+    term.writeln('\r\n\x1b[90m[el proceso terminó — cierra esta terminal o abre una nueva]\x1b[0m');
+    T.started = false; T.exited = true;
+  }, T.sessionId);
+
+  // Redimensionado real: solo la terminal activa ajusta su PTY.
+  T.resizeObs = new ResizeObserver(() => {
+    if (activeTermId !== T.id) return;
+    try { fitAddon.fit(); window.api.termResize(term.cols, term.rows, T.sessionId); } catch {}
+  });
+  T.resizeObs.observe(container);
+
+  // Arrancar el PTY en la carpeta del proyecto.
+  T.started = true;
+  window.api.termStart(rootDir, term.cols, term.rows, T.sessionId);
+
+  setActiveTerminal(id);
+  return T;
+}
+
+// --- Renombrado dinámico de la pestaña según el comando en ejecución ---------
+// Comandos "instantáneos" que no vale la pena mostrar como proceso.
+const TERM_SKIP_CMDS = new Set(['cd', 'ls', 'dir', 'cls', 'clear', 'echo', 'set', 'exit',
+  'pwd', 'title', 'color', 'type', 'cat', 'export', 'which', 'where', 'rem', 'help']);
+
+// Nombre corto del comando de una línea escrita (primer token, sin ruta ni .exe).
+function baseCommandName(line) {
+  let s = (line || '').trim();
+  if (!s) return '';
+  const m = s.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
+  let tok = m ? (m[1] || m[2] || m[3]) : s;
+  tok = tok.split(/[\\/]/).pop();                       // basename
+  tok = tok.replace(/\.(exe|cmd|bat|ps1|sh|com)$/i, '');
+  tok = tok.toLowerCase();
+  if (!tok || TERM_SKIP_CMDS.has(tok)) return '';
+  return tok.slice(0, 24);
+}
+
+// ¿El texto termina con un prompt de shell? (para revertir el nombre al terminar)
+function looksLikePrompt(text) {
+  const t = (text || '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').replace(/\s+$/, '');
+  const tail = t.slice(-160);
+  return /[A-Za-z]:\\[^\n]*>$/.test(tail) ||       // cmd:  C:\...>
+         /\bPS [^\n]*>$/.test(tail) ||             // PowerShell: PS C:\...>
+         /[\w~)\/.][$#]$/.test(tail);              // bash/zsh: ...$  o  ...#
+}
+
+// Rastrea lo que se teclea para saber qué comando se ejecuta (Enter) y nombrar
+// la pestaña con él. Vuelve al nombre base al pulsar Enter en vacío o con Ctrl+C.
+function trackTermInput(T, d) {
+  if (!d || d.charCodeAt(0) === 0x1b) return;   // ignora flechas/escapes
+  for (const ch of d) {
+    const code = ch.charCodeAt(0);
+    if (ch === '\r' || ch === '\n') {
+      const cmd = baseCommandName(T.lineBuf);
+      T.lineBuf = '';
+      if (cmd) { T.runningCmd = cmd; refreshTermLabel(T); }
+      else if (T.runningCmd) { T.runningCmd = null; refreshTermLabel(T); }
+    } else if (code === 0x7f || code === 0x08) {  // backspace
+      T.lineBuf = T.lineBuf.slice(0, -1);
+    } else if (code === 0x03 || code === 0x15) {  // Ctrl+C / Ctrl+U
+      T.lineBuf = '';
+      if (code === 0x03 && T.runningCmd) { T.runningCmd = null; refreshTermLabel(T); }
+    } else if (code >= 0x20) {
+      T.lineBuf += ch;
+    }
+  }
+}
+
+// Etiqueta a mostrar: proceso en ejecución si lo hay, si no el nombre base.
+function tabLabel(T) { return T.runningCmd || T.baseName; }
+
+// Actualiza el nombre de UNA pestaña sin reconstruir toda la barra (barato).
+function refreshTermLabel(T) {
+  const label = tabLabel(T);
+  if (label === T._label) return;
+  T._label = label;
+  const span = T.tabEl && T.tabEl.querySelector('.term-tab-name');
+  if (span) { span.textContent = label; T.tabEl.title = label; }
+  else renderTermTabs();
+}
+
+// Reconstruye la barra de pestañas de terminales.
+function renderTermTabs() {
+  const list = el('term-tabs-list');
+  if (!list) return;
+  list.innerHTML = '';
+  for (const T of terminals.values()) {
+    const label = tabLabel(T);
+    T._label = label;
+    const tab = document.createElement('div');
+    tab.className = 'term-tab' + (T.id === activeTermId ? ' active' : '');
+    tab.title = label;
+    tab.innerHTML =
+      '<i class="codicon codicon-terminal"></i>' +
+      '<span class="term-tab-name">' + escapeHtml(label) + '</span>' +
+      '<i class="codicon codicon-close term-tab-close" title="Cerrar terminal"></i>';
+    tab.addEventListener('click', (e) => {
+      if (e.target.classList.contains('term-tab-close')) { e.stopPropagation(); killTerminal(T.id); return; }
+      setActiveTerminal(T.id);
+    });
+    T.tabEl = tab;
+    list.appendChild(tab);
+  }
+}
+
+// Muestra una terminal (oculta las demás) y le da el foco.
+function setActiveTerminal(id) {
+  if (!terminals.has(id)) return;
+  activeTermId = id;
+  for (const T of terminals.values()) T.container.hidden = (T.id !== id);
+  renderTermTabs();
+  const T = terminals.get(id);
+  setTimeout(() => {
+    try { T.fitAddon.fit(); window.api.termResize(T.term.cols, T.term.rows, T.sessionId); } catch {}
+    T.term.focus();
+  }, 0);
+}
+
+// Cierra una terminal (mata su PTY y libera recursos). Si era la última, crea una nueva.
+function killTerminal(id) {
+  const T = terminals.get(id);
+  if (!T) return;
+  try { window.api.termKill(T.sessionId); } catch {}
+  try { if (T.dataOff) T.dataOff(); } catch {}
+  try { if (T.exitOff) T.exitOff(); } catch {}
+  try { if (T.resizeObs) T.resizeObs.disconnect(); } catch {}
+  try { T.term.dispose(); } catch {}
+  try { T.container.remove(); } catch {}
+  terminals.delete(id);
+  if (activeTermId === id) activeTermId = null;
+  const rest = [...terminals.keys()];
+  if (rest.length) setActiveTerminal(rest[rest.length - 1]);
+  else createTerminal();   // siempre queda al menos una terminal
+  renderTermTabs();
+}
+
+// Menú contextual de la terminal (Copiar / Pegar / Seleccionar todo) — para la
+// instancia de xterm que se pasa como argumento.
+function showTermMenu(x, y, term, doCopy, doPaste) {
   document.querySelectorAll('.term-menu').forEach((m) => m.remove());
   const menu = document.createElement('div');
   menu.className = 'term-menu';
@@ -2459,13 +2625,9 @@ function showTermMenu(x, y, doCopy, doPaste) {
 }
 
 function showTerminal() {
-  initTerminal();
-  setTimeout(() => {
-    try { fitAddon.fit(); } catch {}
-    if (!termStarted) { termStarted = true; window.api.termStart(rootDir, term.cols, term.rows); }
-    try { window.api.termResize(term.cols, term.rows); } catch {}
-    term.focus();
-  }, 0);
+  if (terminals.size === 0) { createTerminal(); return; } // crea+activa la primera
+  const T = activeTerminal() || terminals.get([...terminals.keys()][0]);
+  setActiveTerminal(T.id);
 }
 
 function openTerminalPanel() {
@@ -2894,12 +3056,13 @@ function makeHydraApi(ext) {
       showToast(ext, 'Esta extensión intentó ejecutar un comando oculto (bloqueado por seguridad).', 'error', '#ff7a8a');
       return Promise.resolve({ error: 'hydra.run() está deshabilitado por seguridad. Usá hydra.runInTerminal().' });
     },
-    // Ejecuta un comando en la TERMINAL integrada (VISIBLE para el usuario).
+    // Ejecuta un comando en la TERMINAL integrada activa (VISIBLE para el usuario).
     runInTerminal(cmd) {
       try {
+        const wasStarted = activeTermStarted();
         openTerminalPanel();
-        const send = () => { try { window.api.termInput(String(cmd) + '\r'); } catch (e) {} };
-        setTimeout(send, termStarted ? 120 : 700); // esperar a que arranque el shell la 1ª vez
+        const send = () => { try { window.api.termInput(String(cmd) + '\r', activeTermSession()); } catch (e) {} };
+        setTimeout(send, wasStarted ? 120 : 700); // esperar a que arranque el shell la 1ª vez
       } catch (e) {}
     },
     // Abre una URL en el navegador del sistema (validada en el main, sin shell).
@@ -5859,8 +6022,8 @@ async function aiDeletePath(p) {
   for (const path of [...tabs.keys()]) {
     if (typeof path === 'string' && path.toLowerCase().startsWith(al)) closeTab(path);
   }
-  // Sacar la terminal de adentro (libera el lock del directorio en Windows).
-  try { window.api.termInput('cd /d "%USERPROFILE%"\r'); } catch {}
+  // Sacar TODAS las terminales de adentro (libera el lock del directorio en Windows).
+  try { for (const T of terminals.values()) window.api.termInput('cd /d "%USERPROFILE%"\r', T.sessionId); } catch {}
   if (isWorkspace) closeFolder();           // si borramos la carpeta abierta, la cerramos
   await new Promise((r) => setTimeout(r, 450));
 
@@ -5879,12 +6042,14 @@ async function aiAfterFsChange() {
   }
 }
 
-// Lanza un comando en la terminal integrada (para procesos que quedan corriendo).
+// Lanza un comando en la terminal integrada activa (para procesos que quedan corriendo).
 function aiRunInTerminal(cmd) {
+  const wasStarted = activeTermStarted();
   openTerminalPanel();
+  const sid = activeTermSession();
   setTimeout(() => {
-    try { if (rootDir) window.api.termInput(`cd /d "${rootDir}"\r`); window.api.termInput(cmd + '\r'); } catch {}
-  }, termStarted ? 60 : 800);
+    try { if (rootDir) window.api.termInput(`cd /d "${rootDir}"\r`, sid); window.api.termInput(cmd + '\r', sid); } catch {}
+  }, wasStarted ? 60 : 800);
   const wrap = document.createElement('div');
   wrap.className = 'ai-cmd';
   wrap.innerHTML = '<div class="ai-cmd-head"><i class="codicon codicon-play"></i> En terminal: ' + escapeHtml(cmd) + '</div>';

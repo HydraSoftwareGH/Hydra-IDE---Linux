@@ -362,6 +362,14 @@ ipcMain.handle('term:resize', (evt, cols, rows, sessionId) => {
   if (p && cols > 0 && rows > 0) { try { p.resize(cols, rows); } catch {} }
 });
 
+// Cierra UNA sesión concreta (al cerrar una terminal en la UI). El resto sigue.
+ipcMain.handle('term:kill', (evt, sessionId) => {
+  const key = shellKey(evt.sender.id, sessionId);
+  const p = shells.get(key);
+  if (p) { try { p.kill(); } catch {} shells.delete(key); }
+  return true;
+});
+
 
 // --- Hydra Live (servidor estático con recarga automática, tipo Live Server) -
 let liveServer = null, liveClients = [], liveWatcher = null, liveRoot = null, livePort = 0, liveReloadTimer = null;
