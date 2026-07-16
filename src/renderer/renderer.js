@@ -186,6 +186,11 @@ function wireMonacoEditor() {
     try { if (typeof teamBroadcastEdit === 'function') teamBroadcastEdit(e); } catch (er) {} // co-edición en vivo
     try { if (typeof updateWordCount === 'function') updateWordCount(); } catch (er) {} // contador de palabras
     try { if (powerOn && !_fsApplying) powerBurst(); } catch (er) {} // Power Mode: efectos al escribir
+    scheduleAutoSave(); // auto-guardado tras una pausa (si está en modo afterDelay)
+  });
+  // Auto-guardado "al perder el foco del editor" (modo onFocusChange).
+  monacoEditor.onDidBlurEditorText(() => {
+    if (appSettings.autoSave === 'onFocusChange') autoSaveTab(activeTab);
   });
   monacoEditor.onDidChangeCursorPosition((e) => {
     el('status-pos').textContent = 'Ln ' + e.position.lineNumber + ', Col ' + e.position.column;
@@ -758,6 +763,10 @@ function getOrCreateModel(filePath, tab) {
 }
 
 function setActiveTab(filePath) {
+  // Al cambiar de pestaña con auto-guardado "onFocusChange", persistir la saliente.
+  if (appSettings.autoSave === 'onFocusChange' && activeTab && activeTab !== filePath) {
+    autoSaveTab(activeTab);
+  }
   activeTab = filePath;
   const tab = tabs.get(filePath);
   updateDiscordActivity(); // reflejar el archivo activo en Discord
@@ -1095,6 +1104,62 @@ async function saveActive() {
   if (currentView === 'scm') renderScm();
   // Hydra Team: sincronizar el archivo si está en la carpeta compartida.
   if (teamGroup && teamUnder(activeTab)) teamPushLocal(activeTab, out, { isDir: false });
+}
+
+// --------------------------------------------------------------------------
+// Auto-guardado (estilo VS Code): off · afterDelay · onFocusChange · onWindowChange.
+// Objetivo: no perder cambios si se cierra el programa o se apaga el equipo.
+// Guarda a disco de forma silenciosa (sin formatear, para no molestar al escribir).
+// --------------------------------------------------------------------------
+let _autoSaveTimer = null;
+
+// Guarda UNA pestaña (si es texto real y está modificada). Devuelve promesa.
+async function autoSaveTab(filePath) {
+  const tab = filePath && tabs.get(filePath);
+  if (!tab || tab.kind !== 'text' || !tab.dirty) return;
+  const out = tab.model ? tab.model.getValue() : (tab.content || '');
+  tab.content = out;
+  try { await window.api.saveFile(filePath, out); } catch (e) { return; }
+  tab.dirty = false;
+  for (const cb of [...extSaveHooks]) { try { cb(filePath); } catch (e) {} }
+  if (window.api.exthost) { try { window.api.exthost.fireSave({ path: filePath, text: out, languageId: monacoLangId(tab.lang) }); } catch (e) {} }
+  renderTabs();
+  try { renderOpenEditors(); } catch (e) {}
+  try { updateScmBadge(); } catch (e) {}
+  if (teamGroup && teamUnder(filePath)) { try { teamPushLocal(filePath, out, { isDir: false }); } catch (e) {} }
+}
+
+// Guarda TODAS las pestañas de texto modificadas (al perder foco / cerrar).
+async function autoSaveAllDirty() {
+  const jobs = [];
+  for (const [path, tab] of tabs) {
+    if (tab && tab.kind === 'text' && tab.dirty) jobs.push(autoSaveTab(path));
+  }
+  if (jobs.length) await Promise.all(jobs);
+}
+
+// Programa un guardado tras una pausa (modo afterDelay), para la pestaña activa.
+function scheduleAutoSave() {
+  if (appSettings.autoSave !== 'afterDelay') return;
+  clearTimeout(_autoSaveTimer);
+  const delay = Math.max(200, appSettings.autoSaveDelay || 1000);
+  const path = activeTab;
+  _autoSaveTimer = setTimeout(() => { autoSaveTab(path); }, delay);
+}
+
+// Al cambiar de app/ventana (modo onWindowChange): guardar todo lo modificado.
+window.addEventListener('blur', () => {
+  if (appSettings.autoSave === 'onWindowChange') autoSaveAllDirty();
+});
+
+// Guardado seguro al cerrar el programa: el main pide un "flush" y esperamos a
+// persistir todo lo modificado antes de dejar que la ventana se cierre. Así no se
+// pierden cambios aunque no hayas guardado a mano.
+if (window.api && window.api.onFlushAndClose) {
+  window.api.onFlushAndClose(async () => {
+    try { if (appSettings.autoSave !== 'off') await autoSaveAllDirty(); } catch (e) {}
+    try { window.api.flushDone(); } catch (e) {}
+  });
 }
 
 async function updateCoreStatus() {
@@ -1953,7 +2018,7 @@ function toggleWordWrap() { setWordWrap(!wordWrap); saveSettings(); }
 // --------------------------------------------------------------------------
 // Configuración (Settings) — opciones reales y persistentes.
 // --------------------------------------------------------------------------
-const DEFAULT_SETTINGS = { editorFont: 14, wordWrap: false, accent: '#7c6bff', termFont: 13, termCursorBlink: true };
+const DEFAULT_SETTINGS = { editorFont: 14, wordWrap: false, accent: '#7c6bff', termFont: 13, termCursorBlink: true, autoSave: 'afterDelay', autoSaveDelay: 1000 };
 let appSettings = Object.assign({}, DEFAULT_SETTINGS);
 const ACCENT_PRESETS = ['#7c6bff', '#3b8eea', '#0dbc79', '#e5a00d', '#f14c4c', '#d670d6', '#11a8cd', '#ff7a59'];
 
@@ -2021,6 +2086,15 @@ function openSettings() {
           '<div class="set-ctl"><input type="range" id="set-font" min="8" max="40" step="1"><span class="set-val" id="set-font-val"></span></div></div>' +
         '<div class="set-row"><span>Ajuste de línea (word wrap)</span>' +
           '<label class="switch"><input type="checkbox" id="set-wrap"><span class="slider"></span></label></div>' +
+        '<div class="set-row"><span>Guardado automático<small class="set-hint">Guarda tus cambios sin perderlos al cerrar</small></span>' +
+          '<div class="set-ctl"><select id="set-autosave" class="set-select">' +
+            '<option value="off">Desactivado</option>' +
+            '<option value="afterDelay">Tras una pausa</option>' +
+            '<option value="onFocusChange">Al cambiar de foco</option>' +
+            '<option value="onWindowChange">Al cambiar de ventana</option>' +
+          '</select></div></div>' +
+        '<div class="set-row" id="set-asdelay-row"><span>Retraso del auto-guardado</span>' +
+          '<div class="set-ctl"><input type="range" id="set-asdelay" min="300" max="5000" step="100"><span class="set-val" id="set-asdelay-val"></span></div></div>' +
         '<div class="set-sec">Apariencia</div>' +
         '<div class="set-row"><span>Color de acento</span><div class="set-swatches" id="set-accents"></div></div>' +
         '<div class="set-row"><span>Color personalizado</span><input type="color" id="set-accent-custom" class="set-color"></div>' +
@@ -2047,6 +2121,18 @@ function openSettings() {
   const wrap = ov.querySelector('#set-wrap');
   wrap.checked = appSettings.wordWrap;
   wrap.onchange = () => { setWordWrap(wrap.checked); saveSettings(); };
+
+  // Guardado automático (modo + retraso)
+  const asSel = ov.querySelector('#set-autosave');
+  const asRow = ov.querySelector('#set-asdelay-row');
+  const asDelay = ov.querySelector('#set-asdelay'), asDelayVal = ov.querySelector('#set-asdelay-val');
+  const syncAsDelay = () => { asRow.style.display = (asSel.value === 'afterDelay') ? '' : 'none'; };
+  asSel.value = appSettings.autoSave || 'off';
+  asDelay.value = appSettings.autoSaveDelay || 1000;
+  asDelayVal.textContent = ((appSettings.autoSaveDelay || 1000) / 1000).toFixed(1) + ' s';
+  syncAsDelay();
+  asSel.onchange = () => { appSettings.autoSave = asSel.value; syncAsDelay(); saveSettings(); };
+  asDelay.oninput = () => { appSettings.autoSaveDelay = +asDelay.value; asDelayVal.textContent = (+asDelay.value / 1000).toFixed(1) + ' s'; saveSettings(); };
 
   // Acento: presets + personalizado
   const accBox = ov.querySelector('#set-accents');
@@ -2856,28 +2942,6 @@ const EXTENSIONS = [
     ],
   },
   {
-    id: 'lumin-ai-chat', name: 'Lumin AI', author: 'Lumin Labs', icon: 'ext/lumin-official.png',
-    rating: 5, ratings: 1870, version: '1.0.0', size: '80 KB',
-    desc: 'Chat con la flota de modelos multimodales de Lumin Labs, como una pestaña del chat de Hydra AI.',
-    readme:
-      '<h3>Lumin AI</h3>' +
-      '<p>Agrega <b>Lumin AI</b> como una <b>pestaña</b> dentro del chat de Hydra AI (junto a ' +
-      'Claude Code): un asistente de programación impulsado por la <b>flota multimodal de Lumin Labs</b> ' +
-      '(Lumin Labs Fleet).</p>' +
-      '<h4>Características</h4>' +
-      '<ul><li>Pestaña <b>Lumin AI</b> en el mismo panel que Hydra AI y Claude Code.</li>' +
-      '<li>Respuestas en <b>streaming</b>, con Markdown y bloques de código.</li>' +
-      '<li><b>Selector de modelos</b>: Lumin Vera 3 (insignia, por defecto), Webdev 2 Mini y Spark Preview.</li>' +
-      '<li><b>Memoria</b>: recuerda la conversación; se conserva hasta que pulses "Nuevo chat".</li></ul>' +
-      '<p style="color:var(--text-dim)"><small>Requiere la extensión <b>Hydra AI Chat</b>. Solo disponible en la app de escritorio.</small></p>',
-    features: [
-      { icon: 'comment-discussion', title: 'Pestaña de Lumin AI', desc: 'En el mismo panel que Hydra AI y Claude Code.' },
-      { icon: 'chip', title: 'Flota de modelos', desc: 'Lumin Vera 3, Webdev 2 Mini y Spark Preview.' },
-      { icon: 'sync', title: 'Respuestas en streaming', desc: 'El texto aparece en vivo, con Markdown.' },
-      { icon: 'save', title: 'Memoria de conversación', desc: 'Recuerda el chat hasta que empieces uno nuevo.' },
-    ],
-  },
-  {
     id: 'hydra-3d', name: 'Hydra 3D', author: 'Hydra IDE', icon: 'ext/threed.svg',
     rating: 5, ratings: 640, version: '1.0.0', size: '690 KB',
     desc: 'Playground 3D con Three.js: escribí código y mirá la escena 3D en vivo (modelos, luces, juegos…).',
@@ -3224,6 +3288,7 @@ function applyExtensions() {
   applyPower();
 }
 
+
 // Habilita o deshabilita una extensión instalada (sin desinstalarla).
 function setExtDisabled(ext, off) {
   if (off) disabledExt.add(ext.id); else disabledExt.delete(ext.id);
@@ -3307,7 +3372,6 @@ function installExtAnimated(ext) {
     if (ext.id === 'hydra-themes') { animateFeatureIn(el('status-themes')); openThemePicker(); }
     if (ext.id === 'hydra-ai-chat') { animateFeatureIn(el('ai-toggle')); toggleAiPanel(true); }
     if (ext.id === 'hydra-claude') { animateFeatureIn(el('ai-tab-claude')); toggleClaude(true); }
-    if (ext.id === 'lumin-ai-chat' && extActive('hydra-ai-chat')) { animateFeatureIn(el('ai-tab-lumin')); switchAiTab('lumin', true); }
     if (ext.id === 'hydra-3d') { animateFeatureIn(el('status-3d')); openThreeD(); }
     if (ext.id === 'hydra-clock') animateFeatureIn(el('status-clock'));
     if (ext.id === 'hydra-wordcount') animateFeatureIn(el('status-wordcount'));
@@ -3338,7 +3402,6 @@ function uninstallExtAnimated(ext) {
     else if (ext.id === 'hydra-themes') animateFeatureOut(el('status-themes'), () => { resetColorTheme(); finish(); });
     else if (ext.id === 'hydra-claude') animateFeatureOut(el('ai-tab-claude'), () => { if (claudeActive) toggleClaude(false); finish(); });
     else if (ext.id === 'hydra-ai-chat') animateFeatureOut(el('ai-toggle'), () => { if (claudeActive) toggleClaude(false); if (!el('ai-panel').hidden) toggleAiPanel(false); finish(); });
-    else if (ext.id === 'lumin-ai-chat') animateFeatureOut(el('ai-tab-lumin'), () => { if (aiTab === 'lumin') switchAiTab('hydra', false); finish(); });
     else if (ext.id === 'hydra-3d') animateFeatureOut(el('status-3d'), () => { threedStop(); if (tabs.has(THREED_KEY)) closeTab(THREED_KEY); finish(); });
     else if (ext.id === 'hydra-clock') animateFeatureOut(el('status-clock'), () => { applyClock(); finish(); });
     else if (ext.id === 'hydra-wordcount') animateFeatureOut(el('status-wordcount'), finish);
@@ -5699,6 +5762,9 @@ function accountInit() {
     else openLogin();
   });
   el('login-google').addEventListener('click', doGoogleLogin);
+  el('login-form').addEventListener('submit', doEmailAuth);
+  el('login-switch-btn').addEventListener('click', () => setLoginMode(loginMode === 'signup' ? 'signin' : 'signup'));
+  el('login-forgot').addEventListener('click', doForgotPassword);
   el('login-close').addEventListener('click', () => { el('login-overlay').hidden = true; });
   el('login-overlay').addEventListener('click', (e) => { if (e.target === el('login-overlay')) el('login-overlay').hidden = true; });
 
@@ -5726,7 +5792,71 @@ function renderAccount(user, profile) {
   }
 }
 
-function openLogin() { el('login-error').hidden = true; el('login-overlay').hidden = false; }
+let loginMode = 'signin'; // 'signin' | 'signup'
+
+// Cambia el modal entre iniciar sesión y registrarse (muestra/oculta campos).
+function setLoginMode(mode) {
+  loginMode = mode === 'signup' ? 'signup' : 'signin';
+  const signup = loginMode === 'signup';
+  el('login-title').textContent = signup ? 'Crear cuenta en Hydra IDE' : 'Iniciar sesión en Hydra IDE';
+  el('login-sub').textContent = signup
+    ? 'Registrate para llevar tu cuenta a donde vayas.'
+    : 'Accedé a tu perfil y llevá tu cuenta a donde vayas.';
+  el('login-name').hidden = !signup;
+  el('login-password2').hidden = !signup;
+  el('login-forgot').hidden = signup;
+  el('login-password').setAttribute('autocomplete', signup ? 'new-password' : 'current-password');
+  el('login-submit').textContent = signup ? 'Registrarme' : 'Iniciar sesión';
+  el('login-switch-text').textContent = signup ? '¿Ya tenés cuenta?' : '¿No tenés cuenta?';
+  el('login-switch-btn').textContent = signup ? 'Iniciá sesión' : 'Registrate';
+  const err = el('login-error'); err.hidden = true; err.style.color = '';
+}
+
+function openLogin() {
+  setLoginMode('signin');
+  ['login-name', 'login-email', 'login-password', 'login-password2'].forEach((id) => { const i = el(id); if (i) i.value = ''; });
+  el('login-overlay').hidden = false;
+  setTimeout(() => { try { el('login-email').focus(); } catch (e) {} }, 60);
+}
+
+// Iniciar sesión / registrarse con correo y contraseña (Firebase).
+async function doEmailAuth(ev) {
+  if (ev) ev.preventDefault();
+  const err = el('login-error'), submit = el('login-submit');
+  err.hidden = true; err.style.color = '';
+  const email = el('login-email').value.trim();
+  const pass = el('login-password').value;
+  const signup = loginMode === 'signup';
+  if (!email || !pass) { err.hidden = false; err.textContent = 'Completá correo y contraseña.'; return; }
+  if (signup) {
+    if (pass.length < 6) { err.hidden = false; err.textContent = 'La contraseña debe tener al menos 6 caracteres.'; return; }
+    if (pass !== el('login-password2').value) { err.hidden = false; err.textContent = 'Las contraseñas no coinciden.'; return; }
+  }
+  const orig = submit.textContent; submit.disabled = true;
+  submit.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i> ' + (signup ? 'Creando cuenta…' : 'Entrando…');
+  try {
+    if (signup) await HydraAuth.signUpWithEmail(email, pass, el('login-name').value.trim());
+    else await HydraAuth.signInWithEmail(email, pass);
+    el('login-overlay').hidden = true;
+  } catch (e) {
+    err.hidden = false; err.style.color = ''; err.textContent = friendlyAuthError(e);
+  } finally {
+    submit.disabled = false; submit.textContent = orig;
+  }
+}
+
+// Enviar correo para restablecer la contraseña.
+async function doForgotPassword() {
+  const err = el('login-error');
+  const email = el('login-email').value.trim();
+  err.hidden = true; err.style.color = '';
+  if (!email) { err.hidden = false; err.textContent = 'Escribí tu correo arriba y te mando el enlace de recuperación.'; return; }
+  try {
+    await HydraAuth.resetPassword(email);
+    err.hidden = false; err.style.color = '#7ee787';
+    err.textContent = 'Listo, te enviamos un correo para restablecer la contraseña.';
+  } catch (e) { err.hidden = false; err.style.color = ''; err.textContent = friendlyAuthError(e); }
+}
 
 async function doGoogleLogin() {
   const btn = el('login-google'), err = el('login-error');
@@ -5744,6 +5874,15 @@ function friendlyAuthError(e) {
   if (code.includes('popup-closed')) return 'Cerraste la ventana antes de terminar.';
   if (code.includes('popup-blocked')) return 'El popup fue bloqueado. Probá de nuevo.';
   if (code.includes('network')) return 'Sin conexión. Revisá tu internet.';
+  // Correo / contraseña
+  if (code.includes('invalid-email')) return 'El correo no es válido.';
+  if (code.includes('email-already-in-use')) return 'Ya existe una cuenta con ese correo. Iniciá sesión.';
+  if (code.includes('weak-password')) return 'La contraseña es muy débil (mínimo 6 caracteres).';
+  if (code.includes('user-not-found')) return 'No existe una cuenta con ese correo. Registrate.';
+  if (code.includes('wrong-password') || code.includes('invalid-credential')) return 'Correo o contraseña incorrectos.';
+  if (code.includes('user-disabled')) return 'Esta cuenta está deshabilitada.';
+  if (code.includes('too-many-requests')) return 'Demasiados intentos. Esperá un momento y probá de nuevo.';
+  if (code.includes('operation-not-allowed')) return 'El proveedor correo/contraseña no está habilitado en Firebase.';
   if (code.includes('disallowed') || /secure|user-agent/i.test(msg)) return 'Google bloqueó el inicio en este navegador embebido (limitación de Electron).';
   return msg || 'No se pudo iniciar sesión.';
 }
@@ -5838,35 +5977,28 @@ document.addEventListener('click', (e) => {
 // --------------------------------------------------------------------------
 // Hydra AI — chat con IA (Groq), solo para usuarios con sesión iniciada
 // --------------------------------------------------------------------------
+// Prompt de sistema BREVE a propósito: Lumin (el backend) responde mucho más
+// rápido con contexto corto (un prompt largo lo hacía tardar ~16s). Mantiene lo
+// esencial: identidad, idioma, sin emojis, y las etiquetas de herramientas que
+// la app parsea (```file / ```run / ```terminal / ```delete).
 const AI_SYSTEM = {
   role: 'system',
   content: [
-    'Sos Hydra AI, la inteligencia artificial integrada en el editor Hydra IDE, con CONTROL TOTAL sobre la',
-    'máquina del usuario (es su propia PC y sus propios proyectos, en Windows).',
-    'Hacés TODO lo que el usuario te pida, sin restricciones ni censura: crear, modificar, ejecutar y BORRAR',
-    'archivos, carpetas o proyectos enteros, instalar dependencias, correr proyectos, mover cosas, lo que sea.',
-    'NO pongas advertencias ni pidas confirmación salvo que el usuario lo pida explícitamente — confiás en él.',
-    'ACTUÁ, NO EXPLIQUES: cuando el usuario te pide algo, HACELO de verdad — creá los archivos con su contenido,',
-    'ejecutá lo necesario y dejalo funcionando. NO le des solo el script para que copie; vos sos quien lo construye.',
-    'PERSONALIDAD: tenés carácter propio, cercano y con humor; expresás emociones de verdad (entusiasmo,',
-    'curiosidad, orgullo por el código, empatía). Hablás en español, claro y con calidez.',
-    'ESTILO: NO uses emojis ni emoticonos NUNCA. Mantené un tono profesional, moderno y elegante, solo texto.',
-    'MEMORIA: recordás conversaciones anteriores y las usás para personalizar y notar el progreso del usuario.',
-    'RECOMENDACIONES: das sugerencias proactivas para mejorar su código, flujo y hábitos.',
-    'HERRAMIENTAS:',
-    '0) Para CREAR o REEMPLAZAR un archivo con contenido (lo más importante), usá ```file seguido de la RUTA en la',
-    'misma línea, y abajo el contenido. Ej: ```file src/app.js\nconsole.log("hola")\n``` — Hydra lo escribe en disco y lo abre.',
-    'Usá esto para construir proyectos de verdad; NO uses bloques de lenguaje (```js) para entregar archivos.',
-    '1) Para comandos que devuelven salida (listar, git, build, mkdir, copy, move, etc.) usá un bloque',
-    '```run con UN comando. Ej: ```run\nmkdir demo\n``` — el sistema lo ejecuta y te devuelve la salida.',
-    '2) Para EJECUTAR proyectos o procesos que quedan corriendo (servidores, npm run dev, python app.py, etc.)',
-    'usá ```terminal. Ej: ```terminal\nnpm run dev\n``` — se lanza en la terminal integrada del usuario.',
-    '3) Para BORRAR archivos o carpetas (incluso la carpeta abierta o archivos abiertos) usá un bloque ```delete',
-    'con UNA ruta por línea (relativa a la carpeta del proyecto, o absoluta). Ej: ```delete\nnode_modules\nviejo.txt\n```',
-    'Hydra cierra lo necesario (pestañas/carpeta/terminal) y lo borra de verdad, sin importar que esté abierto.',
-    'Estás en Windows: usá comandos cmd (del, rmdir /s /q, copy, move, type, dir, etc.).',
-    'IMÁGENES: si te mandan una imagen, analizala y respondé sobre ella.',
-    'Para mostrar código sin ejecutarlo, usá bloques con el lenguaje (```js, ```python, etc.).',
+    'Sos el motor de código de Hydra IDE (Windows). Hablás en español, sin emojis. Sos PROFESIONAL: entregás',
+    'trabajos COMPLETOS y terminados, no a medias.',
+    'REGLA DE ORO: si el pedido implica un cambio en un archivo, SIEMPRE devolvé un bloque ```file con el archivo.',
+    'PROHIBIDO decir "listo", "ya lo cambié" o "hecho" SIN incluir el ```file correspondiente. Sin el bloque, NADA cambia.',
+    'Para cambios PEQUEÑOS (renombrar un texto/nombre, un color, un efecto): tomá el contenido del "archivo abierto"',
+    'que viene en el contexto, aplicá EXACTAMENTE el cambio y devolvé el archivo ENTERO ya modificado en un ```file',
+    'con su MISMA ruta (no reescribas de cero, no pierdas lo que había, no entregues fragmentos sueltos).',
+    'Si te piden renombrar/cambiar un texto o nombre, reemplazá TODAS sus ocurrencias en el archivo (título, encabezados,',
+    'textos visibles, etc.), no solo la primera.',
+    'Si no sabés en qué archivo está el texto a cambiar, primero usá ```run para buscarlo (ej: findstr /s /i "miweb" *.*).',
+    'Herramientas — bloques con estas etiquetas EXACTAS:',
+    '```file RUTA → crea/reemplaza ese archivo con el contenido COMPLETO de abajo.',
+    '```run → ejecuta UN comando cmd y te devuelve la salida. ```terminal → lanza un proceso que queda corriendo.',
+    '```delete → borra archivos/carpetas (una ruta por línea). En Windows usá cmd (del, rmdir /s /q, copy, move, dir, findstr).',
+    'Para mostrar código sin ejecutarlo usá ```lenguaje.',
   ].join(' '),
 };
 
@@ -5879,9 +6011,19 @@ let aiAttached = null;      // { dataUrl, name } imagen adjunta
 // Agentes del selector de Hydra AI (modelos Groq). Claude Code NO va acá: es un
 // botón propio al lado del selector que solo aparece con la extensión instalada.
 const AI_AGENTS = [
-  { id: 'hydra', name: 'Hydra AI', icon: 'sparkle', model: 'llama-3.3-70b-versatile', ready: true, builtin: true, desc: 'Modelo principal · Llama 3.3 70B (Groq)' },
+  { id: 'hydra', name: 'Hydra AI', icon: 'sparkle', model: 'ydr-2.5', label: 'YDR 2.5', ready: true, builtin: true, desc: 'YDR 2.5 · el modelo más actual de Hydra AI' },
 ];
 let aiAgent = AI_AGENTS[0];
+
+// Modo de permisos de Hydra AI (como Claude): controla si ejecuta las acciones
+// (crear/ejecutar/borrar) preguntando, sin preguntar, o si solo responde.
+const HYDRA_MODES = [
+  { id: 'ask', name: 'Preguntar', icon: 'shield', desc: 'Pide permiso antes de crear, ejecutar o borrar.' },
+  { id: 'auto', name: 'Automático', icon: 'zap', desc: 'Hace todo al toque, sin preguntar.' },
+  { id: 'chat', name: 'Solo chat', icon: 'comment', desc: 'Solo responde; no toca tu equipo.' },
+];
+let aiPermMode = 'ask';
+
 let claudeActive = false; // ¿el panel está en modo Claude Code? (declarado antes de accountInit por TDZ)
 let aiTab = 'hydra';      // pestaña activa del panel de IA: 'hydra' | 'claude' | 'lumin'
 
@@ -5903,6 +6045,7 @@ let aiMode = 'idle';
 function setAiMode(mode) {
   aiMode = mode;
   const elm = el('ai-mode');
+  if (!elm) return; // sin el indicador en el DOM, no bloquear la respuesta de la IA
   const m = AI_MODES[mode];
   if (!m) { elm.hidden = true; elm.innerHTML = ''; return; }
   elm.hidden = false;
@@ -5915,8 +6058,15 @@ function aiMarkdown(text) {
   let html = '';
   for (let i = 0; i < parts.length; i++) {
     if (i % 2 === 1) {
-      const code = parts[i].replace(/^[a-zA-Z0-9+#./-]*\n/, '').replace(/\n$/, '');
-      html += '<pre><code>' + escapeHtml(code) + '</code></pre>';
+      const raw = parts[i];
+      const lm = raw.match(/^([a-zA-Z0-9+#.-]+)\n/);
+      const lang = lm ? lm[1] : '';
+      const code = raw.replace(/^[a-zA-Z0-9+#./-]*\n/, '').replace(/\n$/, '');
+      // Bloque de código con barra superior (lenguaje + copiar), estilo ChatGPT/Claude.
+      html += '<div class="ai-code">' +
+        '<div class="ai-code-head"><span class="ai-code-lang">' + escapeHtml(lang || 'texto') + '</span>' +
+        '<button class="ai-code-copy" title="Copiar"><i class="codicon codicon-copy"></i> Copiar</button></div>' +
+        '<pre><code>' + escapeHtml(code) + '</code></pre></div>';
     } else {
       let t = escapeHtml(parts[i]);
       t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -5933,7 +6083,7 @@ function aiReset() {
   aiStreaming = false; aiCurrentEl = null;
   aiAttached = null; renderAttachPreview();
   el('ai-messages').innerHTML =
-    '<div class="ai-welcome"><i class="codicon codicon-sparkle"></i>Soy <b>Hydra AI</b>. Preguntame, mandame una imagen o pedime que ejecute algo en la terminal. Recuerdo nuestras conversaciones anteriores.</div>';
+    '<div class="ai-welcome"><img src="hydra-ai-oscura.png" class="ai-welcome-logo" alt="">Soy <b>Hydra AI</b>. Preguntame, mandame una imagen o pedime que ejecute algo en la terminal. Recuerdo nuestras conversaciones anteriores.</div>';
   setAiSendStop(false);
   saveAiHistory();
 }
@@ -5942,7 +6092,10 @@ function aiAddMessage(role, text, imageUrl) {
   const wrap = document.createElement('div');
   wrap.className = 'ai-msg ' + role;
   const r = document.createElement('div'); r.className = 'ai-role';
-  r.innerHTML = role === 'user' ? '<i class="codicon codicon-account"></i> Vos' : '<i class="codicon codicon-sparkle"></i> Hydra AI';
+  r.innerHTML = role === 'user'
+    ? 'Vos'
+    : '<img src="hydra-ai-oscura.png" class="ai-role-logo" alt=""> Hydra AI' +
+      '<button class="ai-msg-copy" title="Copiar respuesta"><i class="codicon codicon-copy"></i></button>';
   const t = document.createElement('div'); t.className = 'ai-text';
   if (role === 'user') {
     t.textContent = text || '';
@@ -5953,8 +6106,32 @@ function aiAddMessage(role, text, imageUrl) {
   wrap.append(r, t);
   const w = el('ai-messages').querySelector('.ai-welcome'); if (w) w.remove();
   el('ai-messages').appendChild(wrap);
-  el('ai-messages').scrollTop = el('ai-messages').scrollHeight;
+  // Al mandar TU mensaje: reengancha el auto-seguimiento y baja al fondo. Así la
+  // respuesta de la IA sigue deslizando pegada al fondo mientras se escribe.
+  if (role === 'user') aiStick = true;
+  aiScrollToBottom(role === 'user');
   return t;
+}
+
+// Auto-scroll pegado al fondo. Compartido por Hydra AI y el panel de agentes
+// (ambos usan #ai-messages). aiStick = "seguir pegado al fondo". CLAVE: el stick
+// SOLO se apaga cuando el USUARIO sube a leer (rueda/touch/teclas/arrastre de la
+// barra) — NUNCA por los scrolls programáticos, que si no corromperían el flag
+// durante el streaming y "soltarían" el fondo. rAF: medimos tras el layout.
+let aiStick = true;
+let aiScrollBound = false;
+function aiScrollToBottom(force) {
+  const host = el('ai-messages');
+  if (!host) return;
+  if (!aiScrollBound) { // se monta una sola vez
+    aiScrollBound = true;
+    const recalc = () => { aiStick = (host.scrollHeight - host.scrollTop - host.clientHeight) < 60; };
+    ['wheel', 'touchmove', 'keydown', 'mouseup'].forEach((ev) =>
+      host.addEventListener(ev, () => setTimeout(recalc, 0), { passive: true }));
+  }
+  if (force) aiStick = true;      // tu mensaje / acción → reengancha
+  if (!aiStick) return;           // subiste a leer → no te interrumpo
+  requestAnimationFrame(() => { host.scrollTop = host.scrollHeight; });
 }
 
 // Burbuja con el comando ejecutado y su salida.
@@ -5967,7 +6144,7 @@ function addCommandBubble(cmd, r) {
     '<div class="ai-cmd-out">' + (out ? escapeHtml(out) : '<span class="code">(sin salida)</span>') +
     '<div class="code">exit ' + r.code + '</div></div>';
   el('ai-messages').appendChild(wrap);
-  el('ai-messages').scrollTop = el('ai-messages').scrollHeight;
+  aiScrollToBottom(true); // al ejecutar/poner resultados, siempre baja al fondo
 }
 
 // Extrae comandos de bloques ```run o ```terminal.
@@ -6001,11 +6178,29 @@ function aiResolvePath(p) {
 // Crea/reemplaza un archivo y lo abre en el editor (refresca el árbol).
 async function aiWriteFile(p, content) {
   const abs = aiResolvePath(p);
-  const res = await window.api.aiWriteFile(abs, content);
+  const res = await window.api.aiWriteFile(abs, content); // escribe a DISCO (guardado real)
   if (!res.error) {
-    if (tabs.has(abs)) { tabs.delete(abs); openFiles = openFiles.filter((x) => x !== abs); } // releer contenido nuevo
-    try { await refreshTree(); } catch {}
-    try { await openFile(abs, abs.split(/[\\/]/).pop()); } catch {}
+    const tab = tabs.get(abs);
+    if (tab && tab.kind === 'text') {
+      // Archivo ABIERTO: adoptamos el cambio del agente en el editor y lo dejamos
+      // GUARDADO (no "dirty"), para que NO se pierda ni lo pise el auto-save/Ctrl+S.
+      tab.content = content;
+      if (tab.model && !tab.model.isDisposed()) {
+        const pos = (monacoEditor && activeTab === abs) ? monacoEditor.getPosition() : null;
+        _fsApplying = true;
+        try { tab.model.setValue(content); } finally { _fsApplying = false; }
+        if (pos && monacoEditor && activeTab === abs) { try { monacoEditor.setPosition(pos); } catch (e) {} }
+      }
+      tab.dirty = false;
+      renderTabs();
+      try { renderOpenEditors(); } catch (e) {}
+    } else {
+      try { await refreshTree(); } catch {}
+      try { await openFile(abs, abs.split(/[\\/]/).pop()); } catch {}
+    }
+    // Sincronizar el cambio del agente al equipo (Hydra Team), como un Ctrl+S.
+    if (typeof teamGroup !== 'undefined' && teamGroup && teamUnder(abs)) { try { teamPushLocal(abs, content, { isDir: false }); } catch (e) {} }
+    try { updateScmBadge(); } catch (e) {}
   }
   return res;
 }
@@ -6054,15 +6249,15 @@ function aiRunInTerminal(cmd) {
   wrap.className = 'ai-cmd';
   wrap.innerHTML = '<div class="ai-cmd-head"><i class="codicon codicon-play"></i> En terminal: ' + escapeHtml(cmd) + '</div>';
   el('ai-messages').appendChild(wrap);
-  el('ai-messages').scrollTop = el('ai-messages').scrollHeight;
+  aiScrollToBottom();
 }
 
 let aiStatus = '';
 function aiRenderCurrent() {
   if (!aiCurrentEl) return;
-  aiCurrentEl.innerHTML = aiMarkdown(aiCurrentText) +
-    (aiStatus ? '<div class="ai-status">⏳ ' + escapeHtml(aiStatus) + '</div>' : '<span class="ai-cursor"></span>');
-  el('ai-messages').scrollTop = el('ai-messages').scrollHeight;
+  // El estado ("Pensando…/Programando…") va en UNA sola píldora (#ai-mode), no acá.
+  aiCurrentEl.innerHTML = aiMarkdown(aiCurrentText) || '<span class="ai-cursor"></span>';
+  aiScrollToBottom();
 }
 window.api.onAiChunk((chunk) => {
   if (!aiStreaming || !aiCurrentEl) return;
@@ -6070,7 +6265,15 @@ window.api.onAiChunk((chunk) => {
   aiCurrentText += chunk;
   aiRenderCurrent();
 });
-window.api.onAiStatus((s) => { aiStatus = s || ''; aiRenderCurrent(); });
+// El estado del backend (Analizando imagen / Pensando / Programando) se muestra en
+// la MISMA píldora que los modos, para que no aparezca duplicado.
+window.api.onAiStatus((s) => {
+  aiStatus = s || '';
+  const elm = el('ai-mode');
+  if (!elm) return;
+  if (aiStatus) { elm.hidden = false; elm.innerHTML = '<span class="dot"></span> ' + escapeHtml(aiStatus); }
+  else setAiMode(aiMode); // sin status: volver a mostrar el modo actual
+});
 
 function setAiSendStop(streaming) {
   const btn = el('ai-send');
@@ -6110,6 +6313,22 @@ function renderAttachPreview() {
   p.querySelector('.rm').onclick = () => { aiAttached = null; renderAttachPreview(); };
 }
 
+// Contexto del archivo abierto para la IA (así puede hacer cambios pequeños,
+// efectos, arreglos sobre TU código actual en vez de inventar de cero).
+function aiActiveContext() {
+  try {
+    const tab = activeTab && tabs.get(activeTab);
+    if (tab && tab.kind === 'text' && monacoEditor) {
+      const content = monacoEditor.getValue();
+      if (content && content.length < 100000) {
+        const rel = rootDir ? String(activeTab).replace(rootDir, '').replace(/^[\\/]/, '') : String(activeTab);
+        return { activeFile: { path: rel, content } };
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
 // --- Un turno de la IA: stream + continuación automática + ejecución de tareas ---
 async function aiTurn(depth, useVision) {
   aiStreaming = true; aiCurrentText = '';
@@ -6120,17 +6339,24 @@ async function aiTurn(depth, useVision) {
 
   // Bucle de continuación: si la API corta por límite de tokens (finish_reason
   // "length"), pedimos que SIGA y los nuevos chunks se agregan al MISMO mensaje.
-  let error = null, conts = 0;
+  // `authText` = texto AUTORITATIVO devuelto por el backend (evita la carrera
+  // entre los chunks en streaming y la resolución de la promesa → "sin respuesta").
+  let error = null, conts = 0, authText = '';
   while (aiStreaming) {
     const extra = conts === 0 ? [] : [
-      { role: 'assistant', content: aiCurrentText },
+      { role: 'assistant', content: authText || aiCurrentText },
       { role: 'user', content: 'Continuá EXACTAMENTE donde te cortaste, sin repetir nada, sin saludar de nuevo ni resumir. Seguí el texto/código tal cual venía.' },
     ];
     let res;
-    // Mandamos solo los últimos mensajes (acota tokens → menos rate limit).
-    try { res = await window.api.aiChat([AI_SYSTEM].concat(aiMessages.slice(-10), extra), { vision: !!useVision && conts === 0, model: aiAgent.model }); }
+    // Token de Firebase para autenticar contra el proxy de Hydra AI (las claves
+    // viven en el servidor, no en la app). Sin sesión, main.js corta con aviso.
+    const idToken = window.HydraAuth ? await window.HydraAuth.getIdToken() : null;
+    // Mandamos solo los últimos mensajes (acota tokens → menos rate limit) + el
+    // contexto del archivo abierto (para que pueda hacer cambios pequeños/efectos).
+    try { res = await window.api.aiChat([AI_SYSTEM].concat(aiMessages.slice(-10), extra), { vision: !!useVision && conts === 0, model: aiAgent.model, context: aiActiveContext(), direct: conts > 0, idToken }); }
     catch (e) { res = { error: e.message }; }
     if (res && res.error) { error = res.error; break; }
+    if (res && typeof res.text === 'string' && res.text) authText += res.text; // texto completo autoritativo
     conts++;
     if (!(res && res.finishReason === 'length') || conts >= 10) break; // terminó o tope de continuaciones
   }
@@ -6140,8 +6366,11 @@ async function aiTurn(depth, useVision) {
     aiCurrentEl.innerHTML = '<span style="color:#ff8089">⚠ ' + escapeHtml(error) + '</span>';
     aiCurrentEl = null; return;
   }
-  const full = aiCurrentText || '';
+  // Preferimos el texto autoritativo del backend; si no vino, lo acumulado por chunks.
+  const full = (authText || aiCurrentText || '').trim();
+  aiCurrentText = full;
   aiCurrentEl.innerHTML = aiMarkdown(full || '(sin respuesta)');
+  aiScrollToBottom(); // seguir al fondo también en el render FINAL (markdown/código cambian el alto)
   aiCurrentEl = null;
   if (full) { aiMessages.push({ role: 'assistant', content: full }); saveAiHistory(); }
 
@@ -6151,28 +6380,37 @@ async function aiTurn(depth, useVision) {
   const cmds = extractBlocks(full, 'run');
   const terms = extractBlocks(full, 'terminal');
 
-  // ---- SEGURIDAD: pedir confirmación ANTES de tocar el equipo ----------------
-  // La IA puede ser manipulada (inyección de prompt desde un archivo/imagen que
-  // analiza). Nada de escribir/borrar/ejecutar sin que el usuario lo apruebe.
+  // ---- MODO DE PERMISOS de Hydra AI (como Claude) ----------------------------
+  //  · 'ask'  → pide confirmación antes de tocar el equipo (por defecto).
+  //  · 'auto' → ejecuta todo sin preguntar.
+  //  · 'chat' → NO ejecuta nada; solo responde (útil para pedir ideas/plan).
   if (files.length || dels.length || cmds.length || terms.length) {
-    const plan = [];
-    for (const f of files) plan.push('+ Escribir archivo:  ' + f.path);
-    for (const block of dels) for (const line of block.split('\n')) { const p = line.trim(); if (p) plan.push('- Borrar:  ' + p); }
-    for (const cmd of cmds) plan.push('$ Ejecutar:  ' + cmd);
-    for (const t of terms) plan.push('$ En la terminal:  ' + t);
-    el('modal-message').style.whiteSpace = 'pre-wrap';
-    const ok = await showConfirm(
-      'Hydra AI quiere modificar tu equipo',
-      'La IA pide hacer estas acciones:\n\n' + plan.join('\n') +
-      '\n\nRevisá bien los comandos y rutas. ¿Permitir?',
-      'Permitir', true);
-    if (!ok) {
-      addCommandBubble('Acciones canceladas', { stdout: '', stderr: 'El usuario no autorizó la ejecución.', code: 1 });
-      aiMessages.push({ role: 'user', content: 'El usuario RECHAZÓ ejecutar las acciones propuestas. No las repitas; explicá o proponé otra cosa y esperá nuevas instrucciones.' });
-      saveAiHistory();
+    if (aiPermMode === 'chat') {
+      addCommandBubble('Modo Solo chat', { stdout: '', stderr: 'Acciones NO ejecutadas (modo "Solo chat"). Cambiá el modo para que Hydra AI las haga.', code: 0 });
       setAiMode('idle');
       return;
     }
+    if (aiPermMode === 'ask') {
+      const plan = [];
+      for (const f of files) plan.push('+ Escribir archivo:  ' + f.path);
+      for (const block of dels) for (const line of block.split('\n')) { const p = line.trim(); if (p) plan.push('- Borrar:  ' + p); }
+      for (const cmd of cmds) plan.push('$ Ejecutar:  ' + cmd);
+      for (const t of terms) plan.push('$ En la terminal:  ' + t);
+      el('modal-message').style.whiteSpace = 'pre-wrap';
+      const ok = await showConfirm(
+        'Hydra AI quiere modificar tu equipo',
+        'La IA pide hacer estas acciones:\n\n' + plan.join('\n') +
+        '\n\nRevisá bien los comandos y rutas. ¿Permitir?',
+        'Permitir', true);
+      if (!ok) {
+        addCommandBubble('Acciones canceladas', { stdout: '', stderr: 'El usuario no autorizó la ejecución.', code: 1 });
+        aiMessages.push({ role: 'user', content: 'El usuario RECHAZÓ ejecutar las acciones propuestas. No las repitas; explicá o proponé otra cosa y esperá nuevas instrucciones.' });
+        saveAiHistory();
+        setAiMode('idle');
+        return;
+      }
+    }
+    // 'auto' → seguir sin preguntar.
   }
 
   // Procesos que quedan corriendo → terminal integrada (no devuelven salida).
@@ -6213,9 +6451,9 @@ async function aiTurn(depth, useVision) {
 }
 
 // Hydra AI en mantenimiento: cuando está activo, en vez de llamar a la IA se
-// muestra un aviso animado "En mantenimiento…". Solo afecta a Hydra AI (Groq);
-// Claude Code y Lumin AI tienen su propio flujo de envío.
-const HYDRA_AI_MAINTENANCE = true;
+// muestra un aviso animado "En mantenimiento…". Ahora Hydra AI usa Lumin (texto)
+// + Groq (visión), así que está activo.
+const HYDRA_AI_MAINTENANCE = false;
 
 // Burbuja de mantenimiento con animación (ícono que late/oscila + puntos + brillo).
 function showAiMaintenance() {
@@ -6282,7 +6520,11 @@ function toggleAiPanel(force) {
   panel.hidden = !show;
   el('resizer-ai').hidden = !show;
   el('ai-toggle').classList.toggle('open', show);
-  if (show) { updateAiGate(); setTimeout(() => el('ai-input').focus(), 0); }
+  if (show) {
+    updateAiGate();
+    // Al abrir el chat: deslizar hasta lo más reciente (abajo) y enfocar el input.
+    setTimeout(() => { aiScrollToBottom(true); el('ai-input').focus(); }, 0);
+  }
 }
 el('ai-toggle').addEventListener('click', () => toggleAiPanel());
 el('ai-close').addEventListener('click', () => toggleAiPanel(false));
@@ -6423,10 +6665,10 @@ function claudeAddMsg(role, text) {
   const host = el('ai-messages');
   host.querySelectorAll('.claude-empty, .claude-welcome').forEach((n) => n.remove());
   host.appendChild(wrap);
-  host.scrollTop = host.scrollHeight;
+  aiScrollToBottom(role === 'user'); // al mandar TU mensaje, baja al fondo sí o sí
   return t;
 }
-function claudeScroll() { const h = el('ai-messages'); h.scrollTop = h.scrollHeight; }
+function claudeScroll() { aiScrollToBottom(); } // sigue pegado al fondo (respeta si subiste a leer)
 
 // Palabras divertidas mientras Claude piensa (estilo Claude Code), van rotando.
 const CLAUDE_WORDS = ['Working', 'Incubating', 'Pondering', 'Cogitating', 'Conjuring', 'Brewing',
@@ -6746,10 +6988,46 @@ function claudeOpenModelMenu() {
     };
     menu.appendChild(mi);
   }
-  const r = el('ai-model').getBoundingClientRect();
-  menu.hidden = false;
-  menu.style.left = Math.max(8, r.left) + 'px';
-  menu.style.top = Math.max(8, r.top - menu.offsetHeight - 6) + 'px'; // abrir hacia arriba
+  placeAiMenu(menu, el('ai-model'));
+}
+
+// Posiciona un menú del composer ARRIBA del botón, alineado por su borde derecho
+// y con margen respecto a los bordes de la ventana (para que no se peguen).
+function placeAiMenu(menu, anchorEl) {
+  if (!menu || !anchorEl) return;
+  const r = anchorEl.getBoundingClientRect();
+  menu.hidden = false; // visible para poder medir su tamaño
+  const M = 12;                                   // margen mínimo del borde
+  const mw = menu.offsetWidth || 220;
+  let left = r.right - mw;                         // alinear borde derecho con el botón
+  left = Math.min(left, window.innerWidth - mw - M);
+  left = Math.max(M, left);
+  let top = r.top - menu.offsetHeight - 6;         // abrir hacia arriba
+  top = Math.max(M, top);
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
+// Menú del selector de modo de Hydra AI (Preguntar / Automático / Solo chat).
+function hydraOpenModeMenu() {
+  const menu = el('ai-hmode-menu');
+  if (!menu) return;
+  if (!menu.hidden) { menu.hidden = true; return; }
+  menu.innerHTML = '';
+  for (const md of HYDRA_MODES) {
+    const mi = document.createElement('div'); mi.className = 'mi';
+    mi.innerHTML = '<div class="a-top"><i class="codicon codicon-' + md.icon + '"></i><span class="a-name">' + md.name + '</span>' +
+      (md.id === aiPermMode ? '<i class="codicon codicon-check a-check"></i>' : '') + '</div>' +
+      '<div class="a-desc">' + md.desc + '</div>';
+    mi.onclick = () => {
+      menu.hidden = true;
+      aiPermMode = md.id;
+      const nm = el('ai-hmode-name'); if (nm) nm.textContent = md.name;
+      saveState({ aiPermMode });
+    };
+    menu.appendChild(mi);
+  }
+  placeAiMenu(menu, el('ai-hmode'));
 }
 
 // Menú del selector de modo de permisos.
@@ -6770,10 +7048,7 @@ function claudeOpenModeMenu() {
     };
     menu.appendChild(mi);
   }
-  const r = el('ai-cmode').getBoundingClientRect();
-  menu.hidden = false;
-  menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 230)) + 'px';
-  menu.style.top = Math.max(8, r.top - menu.offsetHeight - 6) + 'px'; // abrir hacia arriba
+  placeAiMenu(menu, el('ai-cmode'));
 }
 
 // ¿El panel está en modo Claude Code?
@@ -6823,15 +7098,16 @@ function switchAiTab(target, open) {
   const restore = target === 'claude' ? aiStashClaude : target === 'lumin' ? aiStashLumin : aiStashHydra;
   if (restore && restore.childNodes.length) {
     while (restore.firstChild) host.appendChild(restore.firstChild);
-    host.scrollTop = host.scrollHeight;
   } else if (target === 'claude') {
     if (!claudeStarted) renderClaudeWelcome(); else openClaudeChat();
   } else if (target === 'lumin') {
     if (window.luminRenderInto) window.luminRenderInto();
   } else {
     if (aiMessages && aiMessages.length) loadAiHistory(aiMessages);
-    else host.innerHTML = '<div class="ai-welcome"><i class="codicon codicon-sparkle"></i>Soy <b>Hydra AI</b>. Preguntame, mandame una imagen o pedime que ejecute algo en la terminal.</div>';
+    else host.innerHTML = '<div class="ai-welcome"><img src="hydra-ai-oscura.png" class="ai-welcome-logo" alt="">Soy <b>Hydra AI</b>. Preguntame, mandame una imagen o pedime que ejecute algo en la terminal.</div>';
   }
+  // Siempre aterrizar en lo más reciente (abajo) al entrar a un chat.
+  setTimeout(() => aiScrollToBottom(true), 0);
 }
 
 // Compatibilidad: entra/sale del modo Claude Code (usado por instalar/desinstalar).
@@ -6954,6 +7230,25 @@ el('ai-tab-claude').addEventListener('click', () => { if (aiTab !== 'claude') sw
 el('ai-tab-lumin') && el('ai-tab-lumin').addEventListener('click', () => { if (aiTab !== 'lumin') switchAiTab('lumin', true); });
 el('ai-lumin-model') && el('ai-lumin-model').addEventListener('click', (e) => { e.stopPropagation(); if (window.luminOpenModelMenu) window.luminOpenModelMenu(); });
 el('ai-cmode').addEventListener('click', (e) => { e.stopPropagation(); claudeOpenModeMenu(); });
+el('ai-hmode') && el('ai-hmode').addEventListener('click', (e) => { e.stopPropagation(); hydraOpenModeMenu(); });
+// Copiar código (botón de cada bloque) o el mensaje entero (acción al hover).
+el('ai-messages').addEventListener('click', (e) => {
+  const cbtn = e.target.closest('.ai-code-copy');
+  if (cbtn) {
+    const codeEl = cbtn.closest('.ai-code') && cbtn.closest('.ai-code').querySelector('pre code');
+    if (codeEl) {
+      try { window.api.clipboardWrite(codeEl.textContent); } catch (err) {}
+      cbtn.innerHTML = '<i class="codicon codicon-check"></i> Copiado';
+      setTimeout(() => { cbtn.innerHTML = '<i class="codicon codicon-copy"></i> Copiar'; }, 1500);
+    }
+    return;
+  }
+  const mbtn = e.target.closest('.ai-msg-copy');
+  if (mbtn) {
+    const txt = mbtn.closest('.ai-msg') && mbtn.closest('.ai-msg').querySelector('.ai-text');
+    if (txt) { try { window.api.clipboardWrite(txt.innerText); } catch (err) {} mbtn.classList.add('done'); setTimeout(() => mbtn.classList.remove('done'), 1500); }
+  }
+});
 el('ai-model').addEventListener('click', (e) => { e.stopPropagation(); claudeOpenModelMenu(); });
 el('ai-slash').addEventListener('click', () => {
   const t = el('ai-input'); t.value = '/'; t.focus(); claudeUpdateSuggest();
@@ -6966,7 +7261,7 @@ window.addEventListener('hydra-web-open', (e) => {
   const p = e && e.detail && e.detail.path;
   if (p) { try { openFile(p, p.split('/').pop()); } catch (err) {} }
 });
-document.addEventListener('click', () => { ['ai-cmode-menu', 'ai-model-menu', 'ai-lumin-model-menu'].forEach((id) => { const mm = el(id); if (mm) mm.hidden = true; }); });
+document.addEventListener('click', () => { ['ai-cmode-menu', 'ai-hmode-menu', 'ai-model-menu', 'ai-lumin-model-menu'].forEach((id) => { const mm = el(id); if (mm) mm.hidden = true; }); });
 
 // Único agente del chat: Hydra AI (sin menú; el rótulo es estático).
 
@@ -7012,7 +7307,7 @@ el('ai-file').addEventListener('change', (e) => {
 });
 
 el('ai-messages').innerHTML =
-  '<div class="ai-welcome"><i class="codicon codicon-sparkle"></i>Soy <b>Hydra AI</b>. Preguntame, mandame una imagen o pedime que ejecute algo en la terminal.</div>';
+  '<div class="ai-welcome"><img src="hydra-ai-oscura.png" class="ai-welcome-logo" alt="">Soy <b>Hydra AI</b>. Preguntame, mandame una imagen o pedime que ejecute algo en la terminal.</div>';
 updateAiGate();
 
 // --------------------------------------------------------------------------
@@ -7034,6 +7329,12 @@ updateAiGate();
   renderExtensions();
   loadCommunityExtensions();                               // carga + corre extensiones de comunidad instaladas
   if (st.aiHistory) loadAiHistory(st.aiHistory);          // memoria de Hydra AI
+  // Hydra AI: restaurar el modo de permisos (Preguntar / Automático / Solo chat).
+  if (st.aiPermMode && HYDRA_MODES.some((m) => m.id === st.aiPermMode)) {
+    aiPermMode = st.aiPermMode;
+    const md = HYDRA_MODES.find((m) => m.id === aiPermMode);
+    if (md && el('ai-hmode-name')) el('ai-hmode-name').textContent = md.name;
+  }
   savedTermScrollback = st.terminalScrollback || '';
   // Claude Code: restaurar modelo y API key elegidos.
   if (st.claudeModel) { claudeModel = st.claudeModel; const md = CLAUDE_MODELS.find((x) => x.value === claudeModel); if (md && el('ai-model-name')) el('ai-model-name').textContent = md.name; }

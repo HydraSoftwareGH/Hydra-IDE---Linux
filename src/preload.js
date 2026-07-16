@@ -64,6 +64,10 @@ contextBridge.exposeInMainWorld('api', {
   // Plataforma del SO ('win32' | 'linux' | 'darwin') — para el selector de updates.
   platform: process.platform,
 
+  // Guardado seguro al cerrar: el main pide un "flush" y el renderer avisa al terminar.
+  onFlushAndClose: (cb) => ipcRenderer.on('app:flush-and-close', () => cb()),
+  flushDone: () => ipcRenderer.send('app:flush-done'),
+
   // Auto-actualización (electron-updater)
   appVersion: () => ipcRenderer.invoke('app:version'),
   checkUpdates: () => ipcRenderer.invoke('update:check'),

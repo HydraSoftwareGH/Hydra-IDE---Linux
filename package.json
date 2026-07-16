@@ -1,7 +1,7 @@
 {
   "name": "hydra-ide",
   "productName": "Hydra IDE",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Hydra IDE — editor de código estilo VS Code construido con Electron y un núcleo en C++ (N-API)",
   "main": "src/main.js",
   "scripts": {

@@ -263,6 +263,24 @@ function createWindow() {
   // Matar el shell y la sesión de Claude asociados a esta ventana al cerrarse.
   win.webContents.on('destroyed', () => { killShell(win.webContents.id); claudeStop(win.webContents.id); });
 
+  // Guardado seguro al cerrar: pedir al renderer que persista lo modificado antes
+  // de salir, para no perder cambios (junto con el auto-guardado del renderer).
+  let _flushed = false;
+  win.on('close', (e) => {
+    if (_flushed || win.isDestroyed() || win.webContents.isDestroyed()) return;
+    e.preventDefault();
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true; _flushed = true;
+      ipcMain.removeListener('app:flush-done', onDone);
+      if (!win.isDestroyed()) win.close();
+    };
+    const onDone = (evt) => { if (evt.sender === win.webContents) finish(); };
+    ipcMain.on('app:flush-done', onDone);
+    try { win.webContents.send('app:flush-and-close'); } catch { finish(); return; }
+    setTimeout(finish, 2500); // fallback: no bloquear el cierre más de 2.5 s
+  });
+
   // Permitir el popup de autenticación de Firebase/Google (window.open).
   // Allowlist por HOSTNAME exacto/sufijo (no por substring): así "google.com.evil.com"
   // o "evil.com/?x=google.com" NO pasan el filtro.
@@ -486,41 +504,347 @@ function authSession() {
   return ses;
 }
 
-// --- Hydra AI (chat con Groq) — RETIRADO -----------------------------------
-// Los servicios de IA que dependían de APIs externas (Groq y Lumin) se
-// retiraron de esta build pública. Los handlers responden con un aviso de
-// servicio no disponible y no realizan ninguna llamada de red ni contienen
-// claves. Para reactivarlos habría que enchufar un backend proxy propio.
-const AI_UNAVAILABLE = 'Este servicio no está disponible.';
+// --- Hydra AI --------------------------------------------------------------
+// El "cerebro" de texto y CÓDIGO es Cerebras (rápido, OpenAI-compatible), con
+// varios modelos en fallback por si uno está saturado. Para imágenes, un modelo
+// de VISIÓN de Groq "ve" la imagen y genera una descripción en texto que se
+// manda al cerebro. Así Hydra AI programa bien y "ve".
+// PROXY seguro: las claves de Cerebras/Groq/Lumin YA NO viven en la app (serían
+// extraíbles del .asar). Ahora la app pega a una Edge Function de Supabase que
+// guarda las claves del lado servidor y valida el ID token de Firebase del
+// usuario. La URL del proxy NO es secreta: puede ir embebida sin riesgo.
+// (override por variable de entorno para desarrollo/otros entornos).
+const HYDRA_AI_PROXY = process.env.HYDRA_AI_PROXY
+  || 'https://iubgkxdjohlvmlefyugo.supabase.co/functions/v1/hydra-ai';
+// Orden de preferencia (si uno da 429/saturado, se prueba el siguiente).
+const CEREBRAS_MODELS = (process.env.CEREBRAS_MODELS || 'zai-glm-4.7,gpt-oss-120b,gemma-4-31b')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
 let aiAbort = null;
 
-ipcMain.handle('ai:chat', async (evt) => {
+// Llama al proxy: reenvía { provider, payload } con el ID token de Firebase en el
+// header. Devuelve la MISMA Response que el proveedor (streaming incluido), así
+// el resto del código (streamToChat, etc.) no cambia. `provider` ∈ cerebras|groq|lumin.
+async function proxyFetch(provider, payload, signal, idToken) {
+  if (!idToken) throw new Error('Inicia sesión para usar Hydra AI.');
+  return fetch(HYDRA_AI_PROXY, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+    body: JSON.stringify({ provider, payload }),
+    signal,
+  });
+}
+
+// Llama a Cerebras probando los modelos en orden hasta que uno responda (maneja
+// la saturación 429/503 rotando de modelo). Devuelve la Response en streaming.
+async function cerebrasChat(messages, signal, onModel, idToken) {
+  let lastErr = '';
+  for (const model of CEREBRAS_MODELS) {
+    let res;
+    try {
+      // Sin max_tokens: el modelo genera hasta terminar (respuestas completas, sin cortes).
+      res = await proxyFetch('cerebras', { model, messages, stream: true, temperature: 0.4 }, signal, idToken);
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      lastErr = e.message; continue; // error de red → probar el siguiente
+    }
+    if (res.ok) { if (onModel) onModel(model); return res; }
+    const t = await res.text().catch(() => '');
+    lastErr = `${res.status}: ${t.slice(0, 160)}`;
+    if (res.status !== 429 && res.status !== 503) break; // otro error → no seguir rotando
+  }
+  throw new Error(lastErr || 'Cerebras no disponible');
+}
+
+// Extrae el texto de una respuesta (formato OpenAI / variantes).
+function luminExtractContent(j) {
+  if (!j || typeof j !== 'object') return '';
+  const ch = j.choices && j.choices[0];
+  let c =
+    (ch && ch.message && ch.message.content) ||
+    (ch && ch.delta && ch.delta.content) ||
+    (j.message && (j.message.content || j.message)) ||
+    j.content || j.response || j.reply || j.text || j.output ||
+    (j.data && (j.data.content || j.data.message || j.data.text)) || '';
+  if (Array.isArray(c)) c = c.map((p) => (typeof p === 'string' ? p : (p && (p.text || p.content)) || '')).join('');
+  return typeof c === 'string' ? c : '';
+}
+
+// Groq (visión): describe una imagen (data URL o URL) y devuelve texto.
+async function groqDescribeImage(imageUrl, hint, signal, idToken) {
+  const res = await proxyFetch('groq', {
+    model: GROQ_VISION_MODEL,
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: 'Describe esta imagen con el máximo detalle útil: transcribe el texto visible, describe elementos, colores y, si hay código o interfaz, explícalo. Sé exhaustivo y objetivo.' + (hint ? ' Contexto del usuario: ' + hint : '') },
+      { type: 'image_url', image_url: { url: imageUrl } },
+    ] }],
+    temperature: 0.2, max_tokens: 4096, stream: false,
+  }, signal, idToken);
+  if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error('visión ' + res.status + ': ' + t.slice(0, 160)); }
+  const j = await res.json();
+  return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+}
+
+// Reemplaza las imágenes por su descripción (Groq) para que Lumin reciba texto.
+// Solo se analiza la imagen del ÚLTIMO mensaje (las previas ya no se re-analizan).
+async function resolveVisionMessages(messages, signal, status, idToken) {
+  let lastImg = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const c = messages[i] && messages[i].content;
+    if (Array.isArray(c) && c.some((p) => p && p.type === 'image_url')) { lastImg = i; break; }
+  }
+  const out = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (!Array.isArray(m.content)) { out.push(m); continue; }
+    const texts = m.content.filter((p) => p && p.type === 'text' && p.text).map((p) => p.text);
+    if (i === lastImg) {
+      const descs = [];
+      for (const part of m.content) {
+        if (part && part.type === 'image_url' && part.image_url && part.image_url.url) {
+          if (status) status('Analizando la imagen…');
+          let desc;
+          try { desc = await groqDescribeImage(part.image_url.url, texts.join(' '), signal, idToken); }
+          catch (e) { if (e.name === 'AbortError') throw e; desc = '(no se pudo analizar la imagen: ' + e.message + ')'; }
+          descs.push('[Imagen adjunta — descripción]:\n' + desc);
+        }
+      }
+      out.push({ role: m.role, content: [texts.join('\n'), ...descs].filter(Boolean).join('\n\n') });
+    } else {
+      out.push({ role: m.role, content: [texts.join('\n'), '[imagen adjunta previa]'].filter(Boolean).join(' ') });
+    }
+  }
+  return out;
+}
+
+// --- Orquestador: Lumin conversa; para código/cambios arma un prompt a Cerebras.
+// El endpoint y el token de Lumin ahora viven en el proxy (Edge Function).
+const LUMIN_MODEL = process.env.LUMIN_MODEL || 'lumin-vera-3';
+const ORCH_SYSTEM =
+  'Sos Hydra AI, el asistente del editor Hydra IDE. Hablás en español, con calidez y SIN emojis. ' +
+  'REGLA CRÍTICA: vos NUNCA hacés cambios ni escribís/editás archivos, y NUNCA digas que hiciste algo (no digas ' +
+  '"listo", "ya lo cambié", "hecho"). Otro motor ejecuta las acciones. Decidí:\n' +
+  '- POR DEFECTO es CHARLA: si saludan, preguntan algo general, charlan de cualquier tema, piden una EXPLICACIÓN ' +
+  'teórica, o es ambiguo, respondé vos mismo, claro y directo. NUNCA generes código ni archivos en estos casos.\n' +
+  '- Usá [[CODE]] SOLO si el usuario pide EXPLÍCITA y CLARAMENTE crear/modificar/borrar código o archivos de SU ' +
+  'proyecto (p. ej. "creá un botón", "cambiá este color", "arreglá este bug", "agregá una función"). En ese caso ' +
+  'devolvé ÚNICAMENTE una línea que empiece EXACTO con [[CODE]] y luego un PROMPT técnico DETALLADO para el motor de ' +
+  'código (qué archivo, qué cambio exacto, el resultado esperado). No expliques ni saludes cuando uses [[CODE]].\n' +
+  'IMPORTANTE: ante la DUDA, respondé como CHARLA (NO uses [[CODE]]). Jamás inventes un proyecto nuevo ni crees ' +
+  'archivos si no te lo pidieron de forma explícita.';
+
+// Detecta intención de código/cambio (respaldo si Lumin conversa en vez de [[CODE]]).
+function codingIntent(text) {
+  return /\b(cambi|renombr|reemplaz|pon(e|é|le|er)?|agreg|añad|quit|saca|borr|elimin|cre(a|á|ar|ame|ámelo)?|hac(e|é|er|eme)?|modific|edit|arregl|corrig|implement|refactor|efecto|anima|estilo|color|hover|bot[oó]n|men[uú]|navbar|funci[oó]n|c[oó]digo|archivo|script|css|html|js|jsx|ts|componente|dise[ñn]|nombre de mi|se llame|que diga)/i.test(text || '');
+}
+
+// Texto del último mensaje del usuario (para la heurística).
+function lastUserText(convo) {
+  for (let i = convo.length - 1; i >= 0; i--) {
+    const m = convo[i];
+    if (m && m.role === 'user') {
+      if (typeof m.content === 'string') return m.content;
+      if (Array.isArray(m.content)) return m.content.filter((p) => p && p.type === 'text').map((p) => p.text).join(' ');
+    }
+  }
+  return '';
+}
+
+// Llama a Lumin y devuelve el texto completo (sin streaming, para poder decidir).
+async function luminComplete(messages, signal, idToken) {
+  const res = await proxyFetch('lumin', { model: LUMIN_MODEL, messages, stream: false, memory: true, temperature: 0.6, max_tokens: 8192 }, signal, idToken);
+  if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error('Lumin ' + res.status + ': ' + t.slice(0, 140)); }
+  const j = await res.json().catch(() => null);
+  return luminExtractContent(j);
+}
+
+// --- Orquestador resiliente: Lumin primero, Groq de respaldo ----------------
+// Lumin (ai.luminlabs.es) a veces se cuelga o responde con un texto de error.
+// Para no dejar colgada la IA: llamamos a Lumin con un TIMEOUT y, si falla / se
+// pasa / devuelve un texto degradado, GROQ toma la posta (rápido). Además un
+// circuit breaker: tras un fallo de Lumin lo SALTAMOS por un rato y vamos directo
+// a Groq (se reintenta solo al vencer el cooldown). Groq usa el mismo ORCH_SYSTEM,
+// así que decide charla vs [[CODE]] igual que Lumin.
+const ORCH_TIMEOUT_MS = Number(process.env.ORCH_TIMEOUT_MS || 4500);
+const LUMIN_COOLDOWN_MS = Number(process.env.LUMIN_COOLDOWN_MS || 60000);
+const GROQ_TEXT_MODEL = process.env.GROQ_TEXT_MODEL || 'llama-3.3-70b-versatile';
+// Textos con los que Lumin (u otro) avisa que su modelo está caído: los tratamos
+// como fallo para pasar a Groq en vez de mostrárselos al usuario.
+const ORCH_DEGRADED = /problemas de conexi|no\s+pude\s+conectar|error\s+interno|intenta(lo)?\s+(de\s+nuevo|m[aá]s\s+tarde)|model\s+(is\s+)?(unavailable|overloaded)/i;
+let luminDownUntil = 0; // timestamp (ms) hasta el cual saltamos Lumin
+
+// Groq como orquestador/charla (formato OpenAI, mismo rol que Lumin).
+async function groqChat(messages, signal, idToken) {
+  const res = await proxyFetch('groq', { model: GROQ_TEXT_MODEL, messages, stream: false, temperature: 0.5, max_tokens: 4096 }, signal, idToken);
+  if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error('Groq ' + res.status + ': ' + t.slice(0, 140)); }
+  const j = await res.json().catch(() => null);
+  return luminExtractContent(j);
+}
+
+// Lumin con timeout propio (sin matar la señal principal del usuario).
+async function luminWithTimeout(messages, mainSignal, idToken) {
+  const to = new AbortController();
+  const onAbort = () => { try { to.abort(); } catch (e) {} };
+  if (mainSignal) mainSignal.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => { try { to.abort(); } catch (e) {} }, ORCH_TIMEOUT_MS);
+  try {
+    return await luminComplete(messages, to.signal, idToken);
+  } finally {
+    clearTimeout(timer);
+    if (mainSignal) mainSignal.removeEventListener('abort', onAbort);
+  }
+}
+
+// Texto del orquestador: Lumin si está sano; si no, Groq. '' si ambos caen
+// (el llamador lo interpreta como camino de código → Cerebras).
+async function orchestrate(messages, mainSignal, idToken, status) {
+  // Circuit breaker: Lumin vino fallando → directo a Groq por un rato.
+  if (Date.now() < luminDownUntil) {
+    try { return await groqChat(messages, mainSignal, idToken); } catch (e) { return ''; }
+  }
+  try {
+    const text = await luminWithTimeout(messages, mainSignal, idToken);
+    if (ORCH_DEGRADED.test(text || '')) throw new Error('lumin-degraded'); // 200 pero texto de error
+    luminDownUntil = 0; // Lumin respondió bien → limpiar el breaker
+    return text;
+  } catch (e) {
+    if (mainSignal && mainSignal.aborted) { const err = new Error('abort'); err.name = 'AbortError'; throw err; }
+    luminDownUntil = Date.now() + LUMIN_COOLDOWN_MS; // marcar Lumin caído
+    if (status) status('Pensando…');
+    try { return await groqChat(messages, mainSignal, idToken); } catch (e2) { return ''; }
+  }
+}
+
+// Vuelca una Response en streaming (SSE u OpenAI o JSON plano) al chat (ai:chunk)
+// y devuelve { finishReason, text } con el texto COMPLETO acumulado (el renderer
+// lo usa como autoritativo para evitar carreras entre los chunks y la respuesta).
+async function streamToChat(res, wc, channel) {
+  channel = channel || 'ai:chunk';
+  const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+  if (!reader) {
+    const j = await res.json().catch(() => null);
+    const text = luminExtractContent(j);
+    if (text && !wc.isDestroyed()) wc.send(channel, text);
+    return { finishReason: (j && j.choices && j.choices[0] && j.choices[0].finish_reason) || 'stop', text };
+  }
+  const dec = new TextDecoder();
+  let buf = '', raw = '', sawSSE = false, finishReason = null, full = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const piece = dec.decode(value, { stream: true });
+    raw += piece; buf += piece;
+    const lines = buf.split('\n'); buf = lines.pop();
+    for (const line of lines) {
+      const l = line.trim();
+      if (!l.startsWith('data:')) continue;
+      sawSSE = true;
+      const data = l.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+      try {
+        const json = JSON.parse(data);
+        const ch = json.choices && json.choices[0];
+        const delta = luminExtractContent(json);
+        if (delta) { full += delta; if (!wc.isDestroyed()) wc.send(channel, delta); }
+        if (ch && ch.finish_reason) finishReason = ch.finish_reason;
+      } catch {}
+    }
+  }
+  if (!sawSSE) {
+    let j = null; try { j = JSON.parse(raw); } catch {}
+    const text = luminExtractContent(j);
+    if (text) { full = text; if (!wc.isDestroyed()) wc.send(channel, text); }
+    finishReason = (j && j.choices && j.choices[0] && j.choices[0].finish_reason) || 'stop';
+  }
+  return { finishReason, text: full };
+}
+
+ipcMain.handle('ai:chat', async (evt, messages, opts) => {
   const wc = evt.sender;
-  // Servicio de IA (Groq) retirado: respondemos con el aviso, sin llamadas de red.
-  if (!wc.isDestroyed()) wc.send('ai:chunk', AI_UNAVAILABLE);
-  return { ok: true, finishReason: 'stop' };
+  if (!HYDRA_AI_PROXY) return { error: 'Hydra AI no está configurada.' };
+  // El token de Firebase autentica contra el proxy. Sin sesión, no hay IA (esto
+  // es lo que impide que abusen del proxy con nuestras claves).
+  const idToken = opts && opts.idToken;
+  if (!idToken) return { error: 'Inicia sesión para usar Hydra AI.' };
+  aiAbort = new AbortController();
+  const signal = aiAbort.signal;
+  const status = (s) => { if (!wc.isDestroyed()) wc.send('ai:status', s); };
+  try {
+    // 1) Si hay imágenes, Groq (visión) las convierte a texto.
+    let msgs = messages;
+    if (Array.isArray(messages) && messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === 'image_url'))) {
+      msgs = await resolveVisionMessages(messages, signal, status, idToken);
+    }
+    // Separar el system del cliente (formato de herramientas de Hydra) de la charla.
+    const clientSystem = (msgs[0] && msgs[0].role === 'system') ? msgs[0] : null;
+    const convo = clientSystem ? msgs.slice(1) : msgs;
+
+    // 2) ORQUESTADOR (Lumin): ¿charla o código? Si Lumin cae, vamos directo a código.
+    //    En continuaciones (opts.direct) NO re-orquestamos: seguimos con Cerebras.
+    let luminText = '';
+    if (!(opts && opts.direct)) {
+      status('Pensando…');
+      try { luminText = await orchestrate([{ role: 'system', content: ORCH_SYSTEM }, ...convo], signal, idToken, status); }
+      catch (e) { if (e.name === 'AbortError') return { ok: true, aborted: true }; luminText = ''; }
+    }
+
+    // Decisión CHARLA vs CÓDIGO. CLAVE (para no programar/crear archivos sin que
+    // lo pidas): si el orquestador respondió con CHARLA, RESPETAMOS su decisión —
+    // NO forzamos código aunque el texto tenga palabras sueltas tipo "pon"/"hace".
+    // La heurística codingIntent SOLO se usa como respaldo cuando el orquestador
+    // no dio texto (está caído). Así, si solo charlás, Hydra AI no se pone a codear.
+    let isCode;
+    if (opts && opts.direct) isCode = true;                    // continuación de código
+    else if (/\[\[CODE\]\]/i.test(luminText)) isCode = true;   // el orquestador pidió código
+    else if (luminText.trim() !== '') isCode = false;          // el orquestador charló → CHARLA
+    else isCode = codingIntent(lastUserText(convo));           // orquestador caído → heurística de respaldo
+    if (!isCode) {
+      // CHARLA: mostramos la respuesta de Lumin tal cual.
+      status('');
+      if (luminText && !wc.isDestroyed()) wc.send('ai:chunk', luminText);
+      return { ok: true, finishReason: 'stop', text: luminText };
+    }
+
+    // 3) CÓDIGO (Cerebras): usa el prompt de Lumin (si lo hay) + el contexto del archivo.
+    status('Programando…');
+    // Solo usamos como "spec" lo que venga después de [[CODE]]; si Lumin se puso a
+    // charlar, IGNORAMOS su texto y dejamos que Cerebras trabaje sobre el pedido real.
+    const spec = /\[\[CODE\]\]/i.test(luminText) ? luminText.replace(/^[\s\S]*?\[\[CODE\]\]/i, '').trim() : '';
+    const coderMsgs = [];
+    if (clientSystem) coderMsgs.push(clientSystem); // etiquetas ```file/run/terminal/delete
+    const ctx = opts && opts.context;
+    if (ctx && ctx.activeFile && ctx.activeFile.content) {
+      coderMsgs.push({ role: 'user', content: 'CONTEXTO — archivo abierto "' + (ctx.activeFile.path || '') + '":\n```\n' + String(ctx.activeFile.content).slice(0, 100000) + '\n```' });
+    }
+    coderMsgs.push(...convo);
+    if (spec) coderMsgs.push({ role: 'user', content: 'INSTRUCCIÓN TÉCNICA (del orquestador). Implementala COMPLETA, profesional y terminada, con TODOS los archivos/cambios necesarios y sin omitir detalles:\n' + spec });
+
+    status('');
+    let res;
+    try { res = await cerebrasChat(coderMsgs, signal, () => status(''), idToken); }
+    catch (e) { if (e.name === 'AbortError') return { ok: true, aborted: true }; return { error: 'Hydra AI no disponible: ' + e.message }; }
+    const streamed = await streamToChat(res, wc);
+    return { ok: true, finishReason: streamed.finishReason, text: streamed.text };
+  } catch (e) {
+    if (e.name === 'AbortError') return { ok: true, aborted: true };
+    return { error: e.message };
+  } finally { aiAbort = null; }
 });
 
 ipcMain.handle('ai:stop', () => { if (aiAbort) { try { aiAbort.abort(); } catch {} } });
 
-// --- Lumin AI (extensión "Lumin AI Chat") — RETIRADO -----------------------
-// Dependía de un endpoint externo (Lumin Labs) con token embebido. Retirado de
-// esta build: el handler responde con el aviso de servicio no disponible.
+// Lumin AI se FUSIONÓ con Hydra AI (arriba). La pestaña Lumin se retiró; este
+// handler queda como respaldo inerte por compatibilidad.
 let luminAbort = null;
-
 ipcMain.handle('lumin:chat', async (evt) => {
   const wc = evt.sender;
-  if (!wc.isDestroyed()) wc.send('lumin:chunk', AI_UNAVAILABLE);
+  if (!wc.isDestroyed()) wc.send('lumin:chunk', 'Lumin AI ahora forma parte de Hydra AI.');
   return { ok: true, finishReason: 'stop' };
 });
-
 ipcMain.handle('lumin:stop', () => { if (luminAbort) { try { luminAbort.abort(); } catch {} } });
 
-// Completación de código en línea (estilo "copilot"): dependía de Groq. Retirada
-// junto con la IA; devuelve siempre vacío para no mostrar sugerencias fantasma.
-ipcMain.handle('ai:complete', async () => {
-  return { text: '' };
-});
+// Completación de código en línea (inline): pendiente de reactivar. Devuelve vacío.
+ipcMain.handle('ai:complete', async () => { return { text: '' }; });
 
 // Crear/reemplazar un archivo con contenido (crea las carpetas que falten).
 ipcMain.handle('ai:writeFile', async (_evt, target, content) => {

@@ -3,33 +3,37 @@
 (function () {
   if (typeof firebase === 'undefined' || typeof supabase === 'undefined') {
     console.error('[auth] Firebase o Supabase no cargaron.');
-    window.HydraAuth = { onChange() { return () => {}; }, getUser() { return null; }, getProfile() { return null; },
-      signInWithGoogle() { return Promise.reject(new Error('SDK no disponible')); }, signOut() {}, saveProfile() {}, isUsernameAvailable() { return Promise.resolve(true); } };
+    window.HydraAuth = { onChange() { return () => {}; }, getUser() { return null; }, getProfile() { return null; }, getIdToken() { return Promise.resolve(null); },
+      signInWithGoogle() { return Promise.reject(new Error('SDK no disponible')); },
+      signInWithEmail() { return Promise.reject(new Error('SDK no disponible')); },
+      signUpWithEmail() { return Promise.reject(new Error('SDK no disponible')); },
+      resetPassword() { return Promise.resolve(); },
+      signOut() {}, saveProfile() {}, isUsernameAvailable() { return Promise.resolve(true); } };
     return;
   }
 
   firebase.initializeApp(FIREBASE_CONFIG);
   const auth = firebase.auth();
   auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(() => {}); // sesión persistente
-  // CUENTAS (servidor #1) con la NUEVA seguridad (RLS por JWT):
-  // En cada request reenviamos el ID token de Firebase a Supabase. Así el RLS del
-  // nuevo esquema —que lee `request.jwt.claims->>'email'` y `->>'sub'` en
-  // get_current_user_email()/get_current_user_id()— identifica al usuario y deja
-  // crear/leer/guardar SU propio perfil. Sin sesión el callback devuelve null y se
-  // usa la anon key (las lecturas públicas, USING(TRUE), siguen funcionando).
-  // ⚠️ REQUISITO en el proyecto de Supabase: habilitar Firebase como
+  // NUEVA seguridad (RLS por JWT) en AMBOS servidores: en cada request reenviamos
+  // el ID token de Firebase. Así el RLS —que lee `request.jwt.claims->>'email'`—
+  // identifica al usuario. Sin sesión el callback devuelve null y supabase-js usa
+  // la anon key (las lecturas públicas, USING(is_published)/(TRUE), siguen andando).
+  // ⚠️ REQUISITO en CADA proyecto de Supabase: habilitar Firebase como
   //    "Third-Party Auth" (Authentication → Sign In / Providers → Add provider →
   //     Firebase, project ID: hydra-software-b3408). Sin eso, Supabase rechaza el
-  //     token de Firebase (401) y el perfil no se puede guardar.
-  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    accessToken: async () => {
-      try { const u = auth.currentUser; return u ? await u.getIdToken() : null; }
-      catch (e) { return null; }
-    },
-  });
-  // Servidor #2: SOLO extensiones (marketplace de la comunidad).
+  //     token de Firebase (401) y las escrituras fallan.
+  const firebaseAccessToken = async () => {
+    try { const u = auth.currentUser; return u ? await u.getIdToken() : null; }
+    catch (e) { return null; }
+  };
+  // Servidor #1: cuentas / perfiles.
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { accessToken: firebaseAccessToken });
+  // Servidor #2: extensiones (marketplace) + Hydra Team (colaboración). Ahora
+  // tiene RLS, así que TAMBIÉN reenvía el token (antes iba anónimo). Sin esto, el
+  // email del claim llega vacío y publicar/subir ícono/colaborar fallan.
   const sbExt = (typeof SUPABASE_EXT_URL !== 'undefined')
-    ? supabase.createClient(SUPABASE_EXT_URL, SUPABASE_EXT_ANON_KEY, { auth: { persistSession: false } })
+    ? supabase.createClient(SUPABASE_EXT_URL, SUPABASE_EXT_ANON_KEY, { accessToken: firebaseAccessToken })
     : null;
 
   let currentUser = null;
@@ -91,6 +95,12 @@
     onChange(cb) { listeners.add(cb); cb(currentUser, currentProfile); return () => listeners.delete(cb); },
     getUser() { return currentUser; },
     getProfile() { return currentProfile; },
+    // ID token de Firebase del usuario logueado (para autenticar contra el proxy
+    // de Hydra AI). Firebase lo cachea y renueva solo. null si no hay sesión.
+    async getIdToken() {
+      try { const u = auth.currentUser; return u ? await u.getIdToken() : null; }
+      catch (e) { return null; }
+    },
     sanitizeUsername,
 
     // Abre Google en el navegador del sistema y espera el credencial de vuelta.
@@ -102,6 +112,22 @@
         // Respaldo: si en 3 min no llega nada, liberar.
         setTimeout(() => { if (pendingReject === reject) { pendingReject = pendingResolve = null; reject(new Error('Tiempo de espera agotado.')); } }, 180000);
       });
+    },
+
+    // Inicio de sesión con correo/contraseña (proveedor Email/Password de Firebase).
+    async signInWithEmail(email, password) {
+      const cred = await auth.signInWithEmailAndPassword((email || '').trim(), password || '');
+      return cred.user;
+    },
+    // Registro con correo/contraseña. displayName opcional → se guarda en el perfil Firebase.
+    async signUpWithEmail(email, password, displayName) {
+      const cred = await auth.createUserWithEmailAndPassword((email || '').trim(), password || '');
+      if (displayName && cred.user) { try { await cred.user.updateProfile({ displayName: String(displayName).trim() }); } catch (e) {} }
+      return cred.user;
+    },
+    // Envía el correo para restablecer la contraseña.
+    async resetPassword(email) {
+      await auth.sendPasswordResetEmail((email || '').trim());
     },
 
     async signOut() { await auth.signOut(); },

@@ -258,9 +258,8 @@
     <div id="ai-panel" hidden>
       <div class="ai-panel-header">
         <div class="ai-tabs">
-          <button class="ai-tab active" id="ai-tab-hydra"><i class="codicon codicon-sparkle"></i> Hydra AI</button>
+          <button class="ai-tab active" id="ai-tab-hydra"><img src="hydra-ai-oscura.png" alt="" class="ai-hydra-ic"> Hydra AI</button>
           <button class="ai-tab" id="ai-tab-claude" hidden><img src="ext/claude-code.svg" alt="" class="ai-claude-ic"> Claude Code</button>
-          <button class="ai-tab" id="ai-tab-lumin" hidden><img src="ext/lumin-official.png" alt="" class="ai-claude-ic"> Lumin AI</button>
         </div>
         <div class="ai-panel-actions">
           <button class="icon-btn" id="ai-clear" title="Nuevo chat"><i class="codicon codicon-add"></i></button>
@@ -277,16 +276,19 @@
         <div id="ai-attach-preview" class="ai-attach-preview" hidden></div>
         <div class="claude-input-wrap">
           <div id="ai-suggest" class="claude-suggest" hidden></div>
+          <div id="ai-mode" class="ai-mode" hidden></div>
           <div class="ai-composer">
             <textarea id="ai-input" placeholder="Preguntale a Hydra AI…" rows="1"></textarea>
             <div class="ai-toolbar">
               <div class="ai-toolbar-left">
                 <button class="ai-tool-btn" id="ai-attach" title="Adjuntar imagen"><i class="codicon codicon-add"></i></button>
+                <span class="ai-model-badge hydra-only" id="ai-ydr-badge" title="Modelo actual de Hydra AI"><img src="hydra-ai-oscura.png" alt="" class="ai-hydra-ic"> YDR 2.5</span>
                 <button class="ai-tool-btn claude-only" id="ai-slash" title="Comandos"><i class="codicon codicon-terminal"></i></button>
                 <button class="ai-tool-btn claude-only" id="ai-model" title="Modelo"><img src="ext/claude-code.svg" alt="" class="ai-claude-ic"><span id="ai-model-name">Sonnet</span></button>
                 <button class="ai-tool-btn lumin-only" id="ai-lumin-model" title="Modelo de Lumin"><i class="codicon codicon-chip"></i><span id="ai-lumin-model-name">Lumin Vera 3</span></button>
               </div>
               <div class="ai-toolbar-right">
+                <button class="ai-tool-btn hydra-only" id="ai-hmode" title="Modo de Hydra AI"><i class="codicon codicon-shield"></i><span id="ai-hmode-name">Preguntar</span></button>
                 <button class="ai-tool-btn claude-only" id="ai-cmode" title="Modo de permisos"><i class="codicon codicon-zap"></i><span id="ai-cmode-name">Preguntar</span></button>
                 <button id="ai-send" class="ai-send" title="Enviar"><i class="codicon codicon-arrow-up"></i></button>
               </div>
@@ -296,6 +298,7 @@
         <input type="file" id="ai-file" accept="image/*" hidden />
       </div>
       <div id="ai-cmode-menu" class="dropdown" hidden></div>
+      <div id="ai-hmode-menu" class="dropdown" hidden></div>
       <div id="ai-model-menu" class="dropdown" hidden></div>
       <div id="ai-lumin-model-menu" class="dropdown" hidden></div>
     </div>
@@ -367,12 +370,31 @@
   <div id="login-overlay" class="overlay" hidden>
     <div id="login-box">
       <img src="hydra-logo.svg" class="login-logo" alt="" />
-      <h2>Iniciar sesión en Hydra IDE</h2>
-      <p class="login-sub">Accedé a tu perfil y llevá tu cuenta a donde vayas.</p>
+      <h2 id="login-title">Iniciar sesión en Hydra IDE</h2>
+      <p class="login-sub" id="login-sub">Accedé a tu perfil y llevá tu cuenta a donde vayas.</p>
+
+      <form id="login-form" class="login-form" autocomplete="on">
+        <input id="login-name" class="profile-input" type="text" placeholder="Nombre" autocomplete="name" hidden />
+        <input id="login-email" class="profile-input" type="email" placeholder="Correo electrónico" autocomplete="email" />
+        <input id="login-password" class="profile-input" type="password" placeholder="Contraseña" autocomplete="current-password" />
+        <input id="login-password2" class="profile-input" type="password" placeholder="Repetir contraseña" autocomplete="new-password" hidden />
+        <button type="button" id="login-forgot" class="login-link login-forgot">¿Olvidaste tu contraseña?</button>
+        <button type="submit" id="login-submit" class="primary-btn login-submit">Iniciar sesión</button>
+      </form>
+
+      <div class="login-divider"><span>o</span></div>
+
       <button id="login-google" class="google-btn">
         <img src="google.svg" alt="" /> Continuar con Google
       </button>
+
       <div id="login-error" class="login-error" hidden></div>
+
+      <div class="login-switch">
+        <span id="login-switch-text">¿No tenés cuenta?</span>
+        <button type="button" id="login-switch-btn" class="login-link">Registrate</button>
+      </div>
+
       <button id="login-close" class="login-cancel">Cancelar</button>
     </div>
   </div>
